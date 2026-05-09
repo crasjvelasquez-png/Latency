@@ -11,10 +11,8 @@ const dom = {
   totalDevices: $("totalDevices"),
   results: $("results"),
   autoRefreshToggle: $("autoRefreshToggle"),
-  refreshInterval: $("refreshInterval"),
   intervalTrigger: $("intervalTrigger"),
   intervalDropdown: $("intervalDropdown"),
-  intervalValue: $("intervalValue"),
   byChannelToggle: $("byChannelToggle"),
   byPluginToggle: $("byPluginToggle"),
   reportToolbar: $("reportToolbar"),
@@ -24,6 +22,11 @@ const dom = {
   rowCount: $("rowCount"),
   exportJson: $("exportJson"),
   exportCsv: $("exportCsv"),
+  exportToast: $("exportToast"),
+  shell: document.querySelector(".app-shell"),
+  scanTimestamp: $("scanTimestamp"),
+  diagnosticsSummary: $("diagnosticsSummary"),
+  diagnosticsBody: $("diagnosticsBody"),
 };
 
 const state = {
@@ -39,11 +42,14 @@ const state = {
   backgroundScanning: false,
   groupMode: "channel",
   latestReport: null,
+  diagnostics: null,
+  connectionState: "checking",
   searchQuery: "",
   sortKey: "latency-desc",
   showAll: false,
   scanAbort: null,
   statusAbort: null,
+  exportToastTimer: null,
 };
 
 const activeTweens = new Map();
@@ -65,6 +71,15 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function getFocusableElements(container) {
+  if (!container) return [];
+  return Array.from(
+    container.querySelectorAll(
+      'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((el) => !el.disabled && el.offsetParent !== null);
 }
 
 function pluginKey(plugin) {
@@ -90,6 +105,21 @@ function trackNumber(device) {
 
 function pluralize(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function trackKindLabel(value) {
+  switch (value) {
+    case "audio":
+      return "Audio track";
+    case "group":
+      return "Group";
+    case "instrument":
+      return "Instrument track";
+    case "return":
+      return "Return track";
+    default:
+      return "Unknown track";
+  }
 }
 
 function stopTween(el) {
@@ -176,18 +206,94 @@ async function reloadOSC() {
 
 // ── Status ──
 
-function setStatus(online) {
-  state.online = online;
-  const cls = online ? "online" : "offline";
-  const label = online ? "Connected" : "Offline";
+const CONNECTION_LABELS = {
+  checking: "Checking",
+  ready: "Connected",
+  live_closed: "Live closed",
+  abletonosc_missing: "AbletonOSC missing",
+  response_port_conflict: "Port conflict",
+  latency_handler_missing: "Handler missing",
+  automation_permission_missing: "Automation missing",
+  scan_failed: "Scan failed",
+};
 
-  dom.statusPill.className = "status-pill " + cls;
+function statusClass(connectionState) {
+  if (connectionState === "ready") return "online";
+  if (connectionState === "checking") return "";
+  if (connectionState === "automation_permission_missing" || connectionState === "latency_handler_missing") return "warning";
+  return "offline";
+}
+
+function setStatus(connectionStateOrOnline) {
+  const connectionState = typeof connectionStateOrOnline === "boolean"
+    ? (connectionStateOrOnline ? "ready" : "abletonosc_missing")
+    : (connectionStateOrOnline || "checking");
+  state.connectionState = connectionState;
+  state.online = connectionState === "ready";
+  if (state.scanning) return;
+  const cls = statusClass(connectionState);
+  const label = CONNECTION_LABELS[connectionState] || "Offline";
+
+  dom.statusPill.className = `status-pill ${cls}`.trim();
   dom.statusPill.querySelector(".status-text").textContent = label;
+}
+
+function setScanningPill(active, background = false) {
+  if (!active) {
+    dom.statusPill.classList.remove("scanning", "scanning-bg");
+    return;
+  }
+  if (background) {
+    dom.statusPill.classList.add("scanning-bg");
+  } else {
+    dom.statusPill.classList.add("scanning");
+    dom.statusPill.querySelector(".status-text").textContent = "Scanning…";
+  }
 }
 
 function setCurrentProject(project) {
   dom.sessionInfo.textContent = project?.name || "No Ableton project detected";
   dom.sessionInfo.title = project?.path || "";
+}
+
+function diagnosticsValue(value) {
+  if (value === true) return "Yes";
+  if (value === false) return "No";
+  if (value === null || value === undefined || value === "") return "--";
+  return String(value);
+}
+
+function renderDiagnostics(diagnostics) {
+  state.diagnostics = diagnostics;
+  if (!diagnostics) return;
+  const stateLabel = CONNECTION_LABELS[diagnostics.state] || diagnostics.state || "Unknown";
+  dom.diagnosticsSummary.textContent = stateLabel;
+  const candidates = diagnostics.paths?.abletonosc_candidates || [];
+  const candidateRows = candidates.map((item) => `
+    <div class="diagnostics-row">
+      <span>AbletonOSC candidate</span>
+      <code>${escapeHtml(item.path)}</code>
+      <strong>${item.exists ? "Found" : "Missing"}</strong>
+    </div>`).join("");
+  const actions = (diagnostics.recovery_actions || []).map((action) => `<li>${escapeHtml(action)}</li>`).join("");
+  dom.diagnosticsBody.innerHTML = `
+    <div class="diagnostics-grid">
+      <div class="diagnostics-row"><span>State</span><code>${escapeHtml(stateLabel)}</code></div>
+      <div class="diagnostics-row"><span>Live running</span><code>${diagnosticsValue(diagnostics.checks?.live_running)}</code></div>
+      <div class="diagnostics-row"><span>AbletonOSC online</span><code>${diagnosticsValue(diagnostics.checks?.abletonosc_online)}</code></div>
+      <div class="diagnostics-row"><span>Latency handler</span><code>${diagnosticsValue(diagnostics.checks?.latency_handler_available)}</code></div>
+      <div class="diagnostics-row"><span>Automation permission</span><code>${diagnosticsValue(diagnostics.permissions?.automation)}</code></div>
+      <div class="diagnostics-row"><span>AbletonOSC port</span><code>${escapeHtml(diagnostics.ports?.abletonosc_host || "127.0.0.1")}:${escapeHtml(diagnostics.ports?.abletonosc_port ?? "--")}</code></div>
+      <div class="diagnostics-row"><span>Response port</span><code>${escapeHtml(diagnostics.ports?.response_port ?? "--")}</code></div>
+      <div class="diagnostics-row"><span>Current project</span><code>${escapeHtml(diagnostics.paths?.current_project || "--")}</code></div>
+      <div class="diagnostics-row"><span>Default report</span><code>${escapeHtml(diagnostics.paths?.default_report || "--")}</code></div>
+      <div class="diagnostics-row"><span>Cached report</span><code>${escapeHtml(diagnostics.paths?.cached_report || "--")}</code></div>
+      ${candidateRows}
+    </div>
+    <div class="diagnostics-actions">
+      <strong>Recovery actions</strong>
+      <ul>${actions}</ul>
+    </div>`;
 }
 
 function preserveConnectedDuringBackgroundScan() {
@@ -208,15 +314,20 @@ async function refreshStatus() {
     state.latencyHandlerAvailable = data.latency_handler_available;
     state.automationPermission = data.automation_permission;
     state.lastError = data.last_error;
-    if (data.abletonosc_online || !preserveConnectedDuringBackgroundScan()) {
-      setStatus(data.abletonosc_online);
+    if (data.connection_state === "ready" || !preserveConnectedDuringBackgroundScan()) {
+      setStatus(data.connection_state || data.abletonosc_online);
     }
+    renderDiagnostics(data.diagnostics);
     setCurrentProject(data.current_project);
     if (!state.lastScanTime && data.last_scan_time) {
       state.lastScanTime = new Date(data.last_scan_time);
+      updateScanTimestamp();
+    }
+    if (!state.latestReport && data.cached_report) {
+      renderReport(data.cached_report);
     }
   } catch {
-    if (!preserveConnectedDuringBackgroundScan()) setStatus(false);
+    if (!preserveConnectedDuringBackgroundScan()) setStatus("scan_failed");
     setCurrentProject(null);
   } finally {
     clearTimeout(timeoutId);
@@ -235,48 +346,53 @@ function renderLoading() {
   dom.results.innerHTML = rows;
 }
 
+function renderStateCard(state, opts = {}) {
+  const el = dom.results;
+  el.className = "results empty";
+
+  const hasIcon = ["empty", "offline", "error", "success"].includes(state);
+
+  let html = `<div class="state-card" data-state="${escapeHtml(state)}">`;
+  if (hasIcon) html += `<div class="state-card__icon"></div>`;
+  if (opts.title) html += `<h2 class="state-card__title">${escapeHtml(opts.title)}</h2>`;
+  if (opts.description) html += `<p class="state-card__description">${escapeHtml(opts.description)}</p>`;
+  if (opts.errorMessage) html += `<div class="state-card__error">${escapeHtml(opts.errorMessage)}</div>`;
+  if (opts.actionsHtml) html += `<div class="state-card__actions">${opts.actionsHtml}</div>`;
+  if (opts.childrenHtml) html += opts.childrenHtml;
+  html += `</div>`;
+
+  el.innerHTML = html;
+}
+
 function renderEmpty() {
-  dom.results.className = "results empty";
-  dom.results.innerHTML = `
-    <div class="empty-state">
-      <div class="empty-icon">&#9775;</div>
-      <strong>No scan yet</strong>
-      <span>Open your session in Ableton Live, then scan.</span>
-      <div class="recovery-actions">
-        <button class="recovery-btn" onclick="scan({showLoading:true})">Scan now</button>
-        <button class="recovery-btn secondary" onclick="openAbleton()">Open Live</button>
-      </div>
-    </div>`;
+  renderStateCard("empty", {
+    title: "No scan yet",
+    description: "Open your session in Ableton Live, then scan to detect latency-inducing devices.",
+    actionsHtml: `<button class="recovery-btn" onclick="scan({showLoading:true})">Scan now</button>
+      <button class="recovery-btn secondary" onclick="openAbleton()">Open Live</button>`,
+  });
 }
 
 function renderOffline() {
-  dom.results.className = "results empty";
-  dom.results.innerHTML = `
-    <div class="offline-state">
-      <div class="offline-icon">&#9888;</div>
-      <strong>AbletonOSC Offline</strong>
-      <span>Make sure Ableton Live is running with AbletonOSC installed and enabled.</span>
-      <div class="recovery-actions">
-        <button class="recovery-btn" onclick="scan({showLoading:true})">Retry scan</button>
-        <button class="recovery-btn secondary" onclick="openAbleton()">Open Live</button>
-        <button class="recovery-btn secondary" onclick="reloadOSC()">Reload AbletonOSC</button>
-      </div>
-      <span class="recovery-hint">Not working? Check that port 11000 is reachable.</span>
-    </div>`;
+  renderStateCard("offline", {
+    title: "AbletonOSC is offline",
+    description: "Make sure Ableton Live is running with AbletonOSC installed and enabled. Port 11000 must be reachable.",
+    actionsHtml: `<button class="recovery-btn" onclick="openAbleton()">Open Live</button>
+      <button class="recovery-btn secondary" onclick="reloadOSC()">Retry connection</button>`,
+    childrenHtml: `<div class="recovery-secondary">
+      <button class="text-link" onclick="scan({showLoading:true})">Scan anyway</button>
+      <span class="secondary-hint">— only works if AbletonOSC is already running</span>
+    </div>`,
+  });
 }
 
 function renderError(message) {
-  dom.results.className = "results empty";
-  dom.results.innerHTML = `
-    <div class="error-state">
-      <div class="error-icon">!</div>
-      <strong>Scan failed</strong>
-      <span>${escapeHtml(message)}</span>
-      <div class="recovery-actions">
-        <button class="recovery-btn" onclick="scan({showLoading:true})">Retry scan</button>
-        <button class="recovery-btn secondary" onclick="reloadOSC()">Reload AbletonOSC</button>
-      </div>
-    </div>`;
+  renderStateCard("error", {
+    title: "Scan failed",
+    errorMessage: message,
+    actionsHtml: `<button class="recovery-btn" onclick="scan({showLoading:true})">Retry scan</button>
+      <button class="recovery-btn secondary" onclick="reloadOSC()">Reload AbletonOSC</button>`,
+  });
 }
 
 function getLatencyClass(samples, ms) {
@@ -284,6 +400,44 @@ function getLatencyClass(samples, ms) {
   if (latencyMs < 20) return "low";
   if (latencyMs > 100) return "high";
   return "medium";
+}
+
+function updateScanTimestamp() {
+  const el = dom.scanTimestamp;
+  if (!state.lastScanTime) {
+    el.textContent = "Not scanned yet";
+    return;
+  }
+  const now = Date.now();
+  const diffSec = Math.floor((now - state.lastScanTime.getTime()) / 1000);
+  let label;
+  if (diffSec < 5) {
+    label = "Just now";
+  } else if (diffSec < 60) {
+    label = `${diffSec}s ago`;
+  } else if (diffSec < 3600) {
+    label = `${Math.floor(diffSec / 60)}m ago`;
+  } else if (diffSec < 86400) {
+    label = `${Math.floor(diffSec / 3600)}h ago`;
+  } else {
+    label = `${Math.floor(diffSec / 86400)}d ago`;
+  }
+  el.innerHTML = `Scanned <time datetime="${state.lastScanTime.toISOString()}">${label}</time>`;
+}
+
+function setTotalLatencySeverity(totalLatencyMs) {
+  if (!hasNumericValue(totalLatencyMs)) {
+    dom.totalLatencyMs.style.color = "";
+    return false;
+  }
+
+  const latencyClass = getLatencyClass(0, Number(totalLatencyMs));
+  dom.totalLatencyMs.style.color = latencyClass === "high"
+    ? "var(--red)"
+    : latencyClass === "medium"
+      ? "var(--amber)"
+      : "var(--green)";
+  return true;
 }
 
 function renderTrackDetails(instances, { nameLabel = "Track name", numberLabel = "" } = {}) {
@@ -319,13 +473,23 @@ function renderTrackDetails(instances, { nameLabel = "Track name", numberLabel =
 }
 
 function updateDashboardStats(report) {
-  tweenText(dom.totalLatencyMs, Number(report.total_latency_ms || 0), fmtMs);
+  if (setTotalLatencySeverity(report.total_latency_ms)) {
+    tweenText(dom.totalLatencyMs, Number(report.total_latency_ms), fmtMs);
+  } else {
+    stopTween(dom.totalLatencyMs);
+    dom.totalLatencyMs.textContent = "--";
+    delete dom.totalLatencyMs.dataset.value;
+  }
   if (hasNumericValue(report.buffer_size)) {
     tweenText(dom.bufferSize, Number(report.buffer_size), (n) => String(Math.round(n)));
   } else {
     dom.bufferSize.textContent = "--";
   }
-  tweenText(dom.sampleRate, report.sample_rate ? Number(report.sample_rate) / 1000 : 0, (n) => (n ? `${n.toFixed(1)}k` : "--"));
+  if (hasNumericValue(report.sample_rate)) {
+    tweenText(dom.sampleRate, Number(report.sample_rate) / 1000, (n) => (n ? `${n.toFixed(1)}k` : "--"));
+  } else {
+    dom.sampleRate.textContent = "--";
+  }
   tweenText(dom.trackCount, Number(report.track_count || 0), (n) => String(Math.round(n)));
   tweenText(dom.totalDevices, Number(report.device_count || 0), (n) => String(Math.round(n)));
 }
@@ -344,12 +508,10 @@ function createPluginRow(item, maxSessionSamples) {
         <div class="latency-bar"></div>
       </div>
       <div class="plugin-latency-val">
-        <span class="latency-number"></span> <span style="font-size: 10px; color: var(--muted);">ms</span>
+        <span class="latency-number"></span> <span class="latency-unit">ms</span>
       </div>
-      <button class="plugin-toggle" type="button" aria-label="Toggle details">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="6 9 12 15 18 9"></polyline>
-        </svg>
+      <button class="plugin-toggle" type="button" aria-label="Toggle details" aria-expanded="false">
+        <span class="icon-chevron" aria-hidden="true"></span>
       </button>
     </div>
     <div class="track-details"></div>`;
@@ -400,29 +562,20 @@ function pluginRows(report) {
   }));
 }
 
-function allPluginRows(report) {
-  return (report.plugins || []).map((plugin) => ({
-    key: `plugin:${pluginKey(plugin)}`,
-    title: plugin.device_name || "Unnamed Device",
-    subtitle: (plugin.tracks || []).join(", "),
-    latency_samples: Number(plugin.max_latency_samples || 0),
-    latency_ms: Number(plugin.max_latency_ms || 0),
-    instance_count: plugin.instance_count || (plugin.instances || []).length,
-    instances: plugin.instances || [],
-    details: { nameLabel: "Track name", numberLabel: "Track #" },
-  }));
-}
-
 function channelRows(report) {
+  const tracksByIndex = new Map((report.tracks || []).map((track) => [track.index, track]));
   const groups = new Map();
   (report.devices || []).forEach((device) => {
     const number = trackNumber(device);
     const name = device.track_name || "Unnamed Track";
+    const track = tracksByIndex.get(device.track_index) || {};
     const key = `channel:${hasNumericValue(device.track_index) ? device.track_index : name}`;
     const group = groups.get(key) || {
       key,
       title: name,
       track_number: number,
+      track_kind: track.track_kind || device.track_kind || "unknown",
+      track_kind_label: track.track_kind_label || device.track_kind_label || trackKindLabel(track.track_kind || device.track_kind || "unknown"),
       devices: [],
       deviceNames: [],
       latency_samples: 0,
@@ -446,7 +599,7 @@ function channelRows(report) {
   return [...groups.values()].map((group) => ({
     key: group.key,
     title: group.track_number === "--" ? group.title : `${group.track_number}. ${group.title}`,
-    subtitle: `${pluralize(group.devices.length, "plug-in")} · ${group.deviceNames.join(", ")}`,
+    subtitle: group.track_kind_label,
     latency_samples: group.latency_samples,
     latency_ms: group.latency_ms,
     instance_count: group.devices.length,
@@ -489,8 +642,15 @@ function currentRows(report) {
 }
 
 function totalRowCount(report) {
-  const raw = state.groupMode === "channel" ? channelRows(report) : allPluginRows(report);
-  return raw.length;
+  if (state.groupMode === "channel") {
+    const keys = new Set();
+    (report.devices || []).forEach((d) => {
+      const key = hasNumericValue(d.track_index) ? d.track_index : (d.track_name || "");
+      keys.add(key);
+    });
+    return keys.size;
+  }
+  return (report.plugins || []).length;
 }
 
 function updateRowCount(shown, total) {
@@ -510,23 +670,18 @@ function updateResults(report) {
   updateRowCount(rows.length, total);
 
   if (!total) {
-    dom.results.className = "results empty";
-    dom.results.innerHTML = `
-      <div class="empty-state">
-        <div class="empty-icon">&#10003;</div>
-        <strong>No latency devices found</strong>
-        <span>AbletonOSC responded, but the current set reported no plugin latency.</span>
-        <div class="recovery-actions">
-          <button class="recovery-btn" onclick="scan({showLoading:true})">Rescan</button>
-          <button class="recovery-btn secondary" onclick="reloadOSC()">Reload AbletonOSC</button>
-        </div>
-      </div>`;
+    renderStateCard("success", {
+      title: "No latency-inducing devices detected",
+      description: "AbletonOSC responded, but the current set reported no plugin latency.",
+      actionsHtml: `<button class="recovery-btn secondary" onclick="scan({showLoading:true})">Rescan</button>`,
+    });
     return;
   }
 
   if (!rows.length) {
-    dom.results.className = "results";
-    dom.results.innerHTML = `<div class="no-filter-results">No matches for "${escapeHtml(state.searchQuery)}"</div>`;
+    renderStateCard("empty", {
+      title: `No matches for \u201C${escapeHtml(state.searchQuery)}\u201D`,
+    });
     return;
   }
 
@@ -583,6 +738,30 @@ function downloadFile(content, filename, mime) {
   URL.revokeObjectURL(url);
 }
 
+function showExportToast(msg) {
+  clearTimeout(state.exportToastTimer);
+  const el = dom.exportToast;
+  el.textContent = '';
+  el.classList.remove('visible');
+
+  state.exportToastTimer = setTimeout(() => {
+    el.textContent = msg;
+    el.classList.add('visible');
+
+    const dismiss = () => {
+      el.classList.remove('visible');
+      el.textContent = '';
+      clearTimeout(state.exportToastTimer);
+      state.exportToastTimer = null;
+    };
+
+    document.addEventListener('click', dismiss, { once: true });
+    document.addEventListener('keydown', dismiss, { once: true });
+
+    state.exportToastTimer = setTimeout(dismiss, 2000);
+  }, 50);
+}
+
 function exportJson() {
   if (!state.latestReport) return;
   const rows = currentRows(state.latestReport);
@@ -600,6 +779,7 @@ function exportJson() {
     })),
   };
   downloadFile(JSON.stringify(payload, null, 2), "latency-report.json", "application/json");
+  showExportToast("JSON exported");
 }
 
 function exportCsv() {
@@ -612,6 +792,7 @@ function exportCsv() {
     return `${name},${r.latency_ms},${r.latency_samples},${r.instance_count || 0},${tracks}`;
   });
   downloadFile([header, ...csvRows].join("\n"), "latency-report.csv", "text/csv");
+  showExportToast("CSV exported");
 }
 
 // ── Group mode ──
@@ -623,6 +804,8 @@ function setGroupMode(mode) {
   dom.byPluginToggle.classList.toggle("active", mode === "plugin");
   dom.byChannelToggle.setAttribute("aria-pressed", String(mode === "channel"));
   dom.byPluginToggle.setAttribute("aria-pressed", String(mode === "plugin"));
+  dom.searchInput.placeholder =
+    mode === "channel" ? "Filter by track or plug-in\u2026" : "Filter by plug-in name\u2026";
   if (state.latestReport) updateResults(state.latestReport);
 }
 
@@ -641,7 +824,8 @@ async function scan({ showLoading = true } = {}) {
 
   dom.scanButton.disabled = true;
   dom.scanButton.classList.add("scanning");
-  if (showLoading) renderLoading();
+  if (showLoading && !state.hasReport) renderLoading();
+  setScanningPill(true, !showLoading);
 
   const timeoutId = setTimeout(() => controller.abort(), SCAN_TIMEOUT_MS);
 
@@ -657,19 +841,26 @@ async function scan({ showLoading = true } = {}) {
       if (data.code === "scan_in_progress") {
         return;
       }
-      throw new Error(data.error || "Scan failed");
+      const error = new Error(data.error || "Scan failed");
+      error.payload = data;
+      throw error;
     }
 
     setStatus(true);
     state.consecutiveFailures = 0;
     state.currentBackoff = state.intervalSeconds;
     state.lastScanTime = new Date();
+    updateScanTimestamp();
     renderReport(data);
   } catch (err) {
     if (err.name === "AbortError") {
       return;
     }
-    const preserveResults = !showLoading && state.hasReport;
+    const payload = err.payload || {};
+    if (payload.diagnostics) renderDiagnostics(payload.diagnostics);
+    if (payload.cached_report) renderReport(payload.cached_report);
+    const preserveResults = state.hasReport || Boolean(payload.cached_report);
+    setStatus(payload.connection_state || "scan_failed");
     state.consecutiveFailures++;
     if (state.consecutiveFailures >= 3) {
       state.currentBackoff = Math.min(state.currentBackoff * 2, 120);
@@ -683,13 +874,15 @@ async function scan({ showLoading = true } = {}) {
       }
     } else if (!preserveResults) {
       state.latestReport = null;
-      renderError(err.message);
+      renderError(err.message, CONNECTION_LABELS[payload.connection_state] || "Scan failed");
     }
   } finally {
     clearTimeout(timeoutId);
     if (state.scanAbort === controller) state.scanAbort = null;
     state.scanning = false;
     state.backgroundScanning = false;
+    setScanningPill(false);
+    setStatus(state.connectionState);
     dom.scanButton.disabled = false;
     dom.scanButton.classList.remove("scanning");
   }
@@ -731,7 +924,8 @@ dom.autoRefreshToggle.addEventListener("change", () => {
 
 function openIntervalDropdown() {
   dom.intervalDropdown.classList.add("open");
-  dom.refreshInterval.focus();
+  const active = dom.intervalDropdown.querySelector(".interval-option.active") || dom.intervalDropdown.querySelector(".interval-option");
+  if (active) active.focus();
 }
 
 function closeIntervalDropdown() {
@@ -768,22 +962,38 @@ dom.intervalDropdown.addEventListener("keydown", (e) => {
   }
 });
 
-dom.refreshInterval.addEventListener("input", () => {
-  const val = dom.refreshInterval.value;
+dom.intervalDropdown.addEventListener("click", (e) => {
+  const option = e.target.closest(".interval-option");
+  if (!option) return;
+  const val = parseInt(option.dataset.value, 10);
+  dom.intervalDropdown.querySelectorAll(".interval-option").forEach((btn) => {
+    btn.classList.toggle("active", btn === option);
+  });
   dom.intervalTrigger.textContent = val + "s";
-  dom.intervalValue.textContent = val + "s";
-});
-
-dom.refreshInterval.addEventListener("change", () => {
-  const val = parseInt(dom.refreshInterval.value, 10);
-  closeIntervalDropdown();
-  dom.intervalTrigger.focus();
   state.intervalSeconds = val;
   state.currentBackoff = val;
+  closeIntervalDropdown();
+  dom.intervalTrigger.focus();
   if (state.autoRefresh) rescheduleAutoRefresh();
 });
 
 document.addEventListener("click", (e) => {
+  const action = e.target.closest("[data-action]");
+  if (action) {
+    switch (action.dataset.action) {
+      case "scan":
+        scan({ showLoading: true });
+        break;
+      case "open-ableton":
+        openAbleton();
+        break;
+      case "reload-osc":
+        reloadOSC();
+        break;
+    }
+    return;
+  }
+
   if (!dom.intervalDropdown.contains(e.target) && e.target !== dom.intervalTrigger) {
     closeIntervalDropdown();
   }
@@ -816,9 +1026,25 @@ document.addEventListener("visibilitychange", () => {
 
 // ── UI event handlers ──
 
+function toggleRow(row) {
+  const expanded = row.classList.toggle("expanded");
+  const toggleBtn = row.querySelector(".plugin-toggle");
+  if (toggleBtn) toggleBtn.setAttribute("aria-expanded", String(expanded));
+}
+
 dom.results.addEventListener("click", (event) => {
   const toggle = event.target.closest(".plugin-toggle");
-  if (toggle) toggle.closest(".plugin-row")?.classList.toggle("expanded");
+  if (toggle) {
+    const row = toggle.closest(".plugin-row");
+    if (row) toggleRow(row);
+    return;
+  }
+
+  const main = event.target.closest(".plugin-main");
+  if (main) {
+    const row = main.closest(".plugin-row");
+    if (row) toggleRow(row);
+  }
 });
 
 dom.byChannelToggle.addEventListener("click", () => setGroupMode("channel"));
@@ -856,6 +1082,7 @@ const onboarding = {
   overlay: $("onboarding"),
   recheck: $("onboardingRecheck"),
   dismiss: $("onboardingDismiss"),
+  doNotShow: $("onboardingDoNotShow"),
   steps: {
     ableton_running: $("step-ableton"),
     abletonosc_reachable: $("step-osc"),
@@ -865,13 +1092,60 @@ const onboarding = {
 };
 
 const ONBOARDING_DISMISSED_KEY = "latency-onboarding-dismissed";
+const ONBOARDING_SESSION_DISMISSED_KEY = "latency-onboarding-dismissed-session";
 
 function showOnboarding() {
   onboarding.overlay.hidden = false;
+  onboarding.overlay.setAttribute("aria-modal", "true");
+  if ("inert" in HTMLElement.prototype) {
+    if (dom.shell) dom.shell.inert = true;
+  } else {
+    if (dom.shell) {
+      dom.shell.setAttribute("aria-hidden", "true");
+      dom.shell._prevTabIndices = [];
+      getFocusableElements(dom.shell).forEach((el) => {
+        dom.shell._prevTabIndices.push({ el, tabIndex: el.tabIndex });
+        el.tabIndex = -1;
+      });
+    }
+  }
+  const focusables = getFocusableElements(onboarding.overlay);
+  if (focusables.length > 0) {
+    focusables[0].focus();
+  }
 }
 
-function hideOnboarding() {
+function hideOnboarding(returnFocusTo) {
   onboarding.overlay.hidden = true;
+  onboarding.overlay.removeAttribute("aria-modal");
+  if ("inert" in HTMLElement.prototype) {
+    if (dom.shell) dom.shell.inert = false;
+  } else {
+    if (dom.shell) {
+      dom.shell.removeAttribute("aria-hidden");
+      if (dom.shell._prevTabIndices) {
+        dom.shell._prevTabIndices.forEach(({ el, tabIndex }) => {
+          el.tabIndex = tabIndex;
+        });
+        delete dom.shell._prevTabIndices;
+      }
+    }
+  }
+  const target = returnFocusTo || dom.scanButton || getFocusableElements(dom.shell)[0];
+  target?.focus();
+}
+
+function isOnboardingDismissed() {
+  return localStorage.getItem(ONBOARDING_DISMISSED_KEY) === "1" || sessionStorage.getItem(ONBOARDING_SESSION_DISMISSED_KEY) === "1";
+}
+
+function persistOnboardingDismissal() {
+  if (onboarding.doNotShow.checked) {
+    localStorage.setItem(ONBOARDING_DISMISSED_KEY, "1");
+    sessionStorage.removeItem(ONBOARDING_SESSION_DISMISSED_KEY);
+  } else {
+    sessionStorage.setItem(ONBOARDING_SESSION_DISMISSED_KEY, "1");
+  }
 }
 
 function setStepState(key, passed, skipped) {
@@ -915,8 +1189,11 @@ async function runOnboarding() {
     const checks = await res.json();
     applyOnboardingResults(checks);
     if (checks.all_passed) {
-      sessionStorage.setItem(ONBOARDING_DISMISSED_KEY, "1");
-      setTimeout(hideOnboarding, 600);
+      persistOnboardingDismissal();
+      setTimeout(() => {
+        hideOnboarding(dom.scanButton);
+        scan({ showLoading: true });
+      }, 600);
     }
   } catch {
     Object.keys(onboarding.steps).forEach((k) => setStepState(k, false, false));
@@ -927,8 +1204,63 @@ async function runOnboarding() {
 
 onboarding.recheck.addEventListener("click", runOnboarding);
 onboarding.dismiss.addEventListener("click", () => {
-  sessionStorage.setItem(ONBOARDING_DISMISSED_KEY, "1");
+  persistOnboardingDismissal();
   hideOnboarding();
+});
+
+function handleOnboardingKeydown(e) {
+  if (onboarding.overlay.hidden) return;
+
+  if (e.key === "Escape") {
+    e.preventDefault();
+    persistOnboardingDismissal();
+    hideOnboarding();
+    return;
+  }
+
+  if (e.key === "Tab") {
+    const focusables = getFocusableElements(onboarding.overlay);
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+}
+
+onboarding.overlay.addEventListener("keydown", handleOnboardingKeydown);
+
+onboarding.overlay.addEventListener("focusout", (e) => {
+  if (onboarding.overlay.hidden) return;
+  if (!onboarding.overlay.contains(e.relatedTarget)) {
+    const focusables = getFocusableElements(onboarding.overlay);
+    if (focusables.length > 0) {
+      focusables[0].focus();
+    }
+  }
+});
+
+// ── App Navigation ──
+
+function setAppView(view) {
+  document.querySelectorAll(".app-nav-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.view === view);
+  });
+  document.querySelectorAll(".app-section").forEach((section) => {
+    section.hidden = section.dataset.view !== view;
+  });
+}
+
+document.querySelector(".app-nav").addEventListener("click", (e) => {
+  const btn = e.target.closest(".app-nav-btn");
+  if (!btn) return;
+  setAppView(btn.dataset.view);
 });
 
 // ── Init ──
@@ -936,10 +1268,31 @@ onboarding.dismiss.addEventListener("click", () => {
 async function init() {
   refreshStatus();
   setInterval(refreshStatus, 5000);
+  updateScanTimestamp();
+  setInterval(updateScanTimestamp, 10000);
 
-  if (!sessionStorage.getItem(ONBOARDING_DISMISSED_KEY)) {
+  if (isOnboardingDismissed()) {
+    scan({ showLoading: true });
+    return;
+  }
+
+  // Run checks silently; only show the onboarding modal if something is wrong.
+  let checks = null;
+  try {
+    const res = await fetch("/api/onboarding");
+    checks = await res.json();
+    applyOnboardingResults(checks);
+  } catch {
+    // Network error — fall through to show onboarding.
+  }
+
+  if (checks?.all_passed) {
+    persistOnboardingDismissal();
+    scan({ showLoading: true });
+  } else {
     showOnboarding();
-    runOnboarding();
+    // Checks already applied above if we got a response; re-run only on network error.
+    if (!checks) runOnboarding();
   }
 }
 

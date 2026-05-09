@@ -7,63 +7,72 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <main class="shell">
-    <header class="topbar">
+  <div class="app-shell">
+    <header class="app-header">
       <div class="logo-area">
         <div class="app-icon">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-          </svg>
+          <span class="icon-app" aria-hidden="true"></span>
         </div>
         <div>
           <h1>Latency</h1>
           <p id="sessionInfo" class="session-info">Detecting open project...</p>
+          <p id="scanTimestamp" class="scan-timestamp" aria-live="polite">Not scanned yet</p>
         </div>
       </div>
-      <div class="actions">
-        <div id="statusPill" class="status-pill">
-          <span class="dot"></span>
-          <span class="status-text">Checking</span>
+      <div class="header-actions">
+        <div class="connection-status">
+          <div id="statusPill" class="status-pill">
+            <span class="dot"></span>
+            <span class="status-text">Checking</span>
+          </div>
         </div>
-        <div class="auto-refresh">
+        <div class="refresh-controls">
           <label class="toggle-switch">
             <input type="checkbox" id="autoRefreshToggle">
             <span class="toggle-track"></span>
-            <span>Auto-scan</span>
+            <span class="toggle-label">Auto</span>
           </label>
           <div class="interval-popdown">
             <button id="intervalTrigger" class="interval-trigger" type="button">30s</button>
             <div id="intervalDropdown" class="interval-dropdown">
-              <input type="range" id="refreshInterval" min="5" max="60" value="30" step="1">
-              <span id="intervalValue" class="interval-value">30s</span>
+              <button class="interval-option" data-value="5" type="button">5s</button>
+              <button class="interval-option" data-value="10" type="button">10s</button>
+              <button class="interval-option active" data-value="30" type="button">30s</button>
+              <button class="interval-option" data-value="60" type="button">60s</button>
             </div>
           </div>
         </div>
-        <button id="scanButton" class="scan-button" type="button">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; vertical-align: middle;">
-            <circle cx="12" cy="12" r="10"></circle>
-            <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"></path>
-            <path d="M2 12h20"></path>
-          </svg>
-          Scan now
-        </button>
+        <div class="scan-controls">
+          <button id="scanButton" class="scan-button" type="button">
+            <span class="icon-scan" aria-hidden="true"></span>
+            Scan now
+          </button>
+        </div>
       </div>
     </header>
 
-    <section class="info-cards" aria-label="Dashboard summary">
+    <nav class="app-nav" aria-label="Main">
+      <button data-view="scan" class="app-nav-btn active">Scan</button>
+      <button data-view="history" class="app-nav-btn">History</button>
+      <button data-view="settings" class="app-nav-btn">Settings</button>
+      <button data-view="help" class="app-nav-btn">Help</button>
+    </nav>
+
+    <section class="app-section" data-view="scan">
+    <main class="app-main">
+      <section class="dashboard-summary" aria-label="Dashboard summary">
       <div class="info-card">
         <div class="info-card-header">
-          <h3>TOTAL PLUGIN LATENCY</h3>
-          <p class="info-card-hint">Sum of delay reported by all devices in the session</p>
+          <h3>Total plugin latency</h3>
         </div>
         <div class="info-card-value">
-          <strong id="totalLatencyMs" class="text-red">--</strong><span class="unit">ms</span>
+          <strong id="totalLatencyMs">--</strong><span class="unit">ms</span>
         </div>
       </div>
 
       <div class="info-card">
         <div class="info-card-header">
-          <h3>BUFFER · SAMPLE RATE</h3>
+          <h3>Buffer · sample rate</h3>
         </div>
         <div class="info-card-value">
           <strong id="bufferSize">--</strong><span class="unit">/ <span id="sampleRate">--</span></span>
@@ -74,29 +83,46 @@
       </div>
     </section>
 
-    <section class="panel">
+    <section id="recommendations" class="recommendations-panel" aria-label="Recommendations" hidden>
+      <div class="recommendations-header">
+        <h2>Recommendations</h2>
+        <p class="recommendations-subtitle">What you should do next to reduce latency</p>
+      </div>
+      <div class="recommendations-list">
+        <div class="recommendations-empty">Run a scan and we'll suggest concrete steps to lower your session latency.</div>
+      </div>
+    </section>
+
+    <section class="diagnostics-panel" aria-label="Diagnostics">
+      <details id="diagnosticsDetails">
+        <summary>
+          <span>Diagnostics</span>
+          <span id="diagnosticsSummary" class="diagnostics-summary">Checking connection...</span>
+        </summary>
+        <div id="diagnosticsBody" class="diagnostics-body"></div>
+      </details>
+    </section>
+
+    <section class="report-panel">
       <div class="panel-header">
         <div>
-          <h2>Plug-ins</h2>
+          <h2>Plugins</h2>
           <div class="legend">
-            <span class="legend-item"><span class="dot green"></span>&lt; 20</span>
-            <span class="legend-item"><span class="dot yellow"></span>20-100</span>
-            <span class="legend-item"><span class="dot red"></span>100+</span>
+            <span class="legend-item"><span class="dot green"></span>&lt; 20 ms</span>
+            <span class="legend-item"><span class="dot yellow"></span>20-100 ms</span>
+            <span class="legend-item"><span class="dot red"></span>100+ ms</span>
           </div>
         </div>
-        <div class="view-toggle" role="group" aria-label="Group plug-ins by">
+        <div class="view-toggle" role="group" aria-label="Group plugins by">
           <button id="byChannelToggle" class="view-toggle-button active" type="button" data-view="channel" aria-pressed="true">By channel</button>
-          <button id="byPluginToggle" class="view-toggle-button" type="button" data-view="plugin" aria-pressed="false">By plug-in</button>
+          <button id="byPluginToggle" class="view-toggle-button" type="button" data-view="plugin" aria-pressed="false">By plugin</button>
         </div>
       </div>
       <div class="report-toolbar" id="reportToolbar" hidden>
         <div class="toolbar-left">
           <div class="search-box">
-            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="11" cy="11" r="8"></circle>
-              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-            </svg>
-            <input type="text" id="searchInput" placeholder="Filter by name or track..." autocomplete="off" spellcheck="false">
+            <span class="icon-search" aria-hidden="true"></span>
+            <input type="text" id="searchInput" placeholder="Filter by name or track..." aria-label="Filter results" autocomplete="off" spellcheck="false">
           </div>
           <div class="sort-control">
             <label for="sortSelect" class="sort-label">Sort</label>
@@ -108,9 +134,9 @@
           </div>
         </div>
         <div class="toolbar-right">
-          <label class="toggle-switch show-all-toggle">
+          <label class="show-all-label">
             <input type="checkbox" id="showAllToggle">
-            <span class="toggle-track"></span>
+            <span class="check-box"></span>
             <span>Show all</span>
           </label>
           <span id="rowCount" class="row-count"></span>
@@ -118,29 +144,60 @@
             <button id="exportJson" class="export-button" type="button">JSON</button>
             <button id="exportCsv" class="export-button" type="button">CSV</button>
           </div>
+          <span id="exportToast" class="export-toast" aria-live="polite" role="status"></span>
         </div>
       </div>
       <div id="results" class="results empty">
-        <div class="empty-state">
-          <div class="empty-icon">&#9775;</div>
-          <strong>No scan yet</strong>
-          <span>Open your session in Ableton Live, then scan.</span>
-          <div class="recovery-actions">
+        <div class="state-card" data-state="empty">
+          <div class="state-card__icon"></div>
+          <h2 class="state-card__title">No scan yet</h2>
+          <p class="state-card__description">Open your session in Ableton Live, then scan to detect latency-inducing devices.</p>
+          <div class="state-card__actions">
             <button class="recovery-btn" onclick="scan({showLoading:true})">Scan now</button>
             <button class="recovery-btn secondary" onclick="openAbleton()">Open Live</button>
           </div>
         </div>
       </div>
     </section>
-  </main>
+    </main>
+    </section>
 
-  <div id="onboarding" class="onboarding-overlay" hidden>
+    <section class="app-section" data-view="history" hidden>
+      <div class="placeholder-view">
+        <div class="placeholder-icon">
+          <span class="icon-clock" aria-hidden="true"></span>
+        </div>
+        <h2>Scan History</h2>
+        <p>Past scan results will appear here.</p>
+      </div>
+    </section>
+
+    <section class="app-section" data-view="settings" hidden>
+      <div class="placeholder-view">
+        <div class="placeholder-icon">
+          <span class="icon-settings" aria-hidden="true"></span>
+        </div>
+        <h2>Settings</h2>
+        <p>Configuration options will appear here.</p>
+      </div>
+    </section>
+
+    <section class="app-section" data-view="help" hidden>
+      <div class="placeholder-view">
+        <div class="placeholder-icon">
+          <span class="icon-help" aria-hidden="true"></span>
+        </div>
+        <h2>Help</h2>
+        <p>Documentation and support will appear here.</p>
+      </div>
+    </section>
+  </div>
+
+  <section id="onboarding" class="modal" hidden>
     <div class="onboarding-card">
       <div class="onboarding-header">
         <div class="onboarding-icon">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-          </svg>
+          <span class="icon-app" aria-hidden="true"></span>
         </div>
         <h2>Setup checklist</h2>
         <p class="onboarding-subtitle">Complete these steps to start scanning latency.</p>
@@ -208,10 +265,17 @@
 
       <div class="onboarding-actions">
         <button id="onboardingRecheck" class="onboarding-btn" type="button">Re-check</button>
-        <button id="onboardingDismiss" class="onboarding-btn onboarding-btn-secondary" type="button">Skip for now</button>
+        <button id="onboardingDismiss" class="onboarding-btn onboarding-btn-secondary" type="button">Skip this session</button>
+      </div>
+      <div class="onboarding-footer">
+        <label class="do-not-show">
+          <input type="checkbox" id="onboardingDoNotShow">
+          <span class="check-box"></span>
+          <span>Do not show again</span>
+        </label>
       </div>
     </div>
-  </div>
+  </section>
 
   <script src="/app.js"></script>
 </body>

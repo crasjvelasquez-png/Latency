@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+import ctypes
+import ctypes.util
 import errno
 import fcntl
 import json
@@ -8,6 +10,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -58,7 +61,7 @@ class OSCRequest:
                     f"Response port {RESPONSE_PORT} is already in use. "
                     "Another instance of LatencyManager may be running."
                 ) from exc
-            rais
+            raise
 
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -74,6 +77,30 @@ class OSCRequest:
         finally:
             server.shutdown()
             server.server_close()
+
+
+RECOVERY_ACTIONS = {
+    "ready": ["Run a scan."],
+    "live_closed": ["Open Ableton Live.", "Load the Live set you want to scan."],
+    "abletonosc_missing": [
+        "Install AbletonOSC into Live's MIDI Remote Scripts folder.",
+        "Enable AbletonOSC in Live Settings > Link, Tempo & MIDI.",
+        f"Confirm UDP port {ABLETONOSC_PORT} is reachable on {ABLETONOSC_HOST}.",
+    ],
+    "response_port_conflict": [
+        "Quit the other LatencyManager instance or process using the response port.",
+        f"Free UDP port {RESPONSE_PORT} and retry.",
+    ],
+    "latency_handler_missing": [
+        "Install or update the AbletonOSC latency export handler.",
+        "Run python3 app.py --reload-abletonosc after updating AbletonOSC.",
+    ],
+    "automation_permission_missing": [
+        "Allow Automation access when macOS prompts.",
+        "Enable Automation for your terminal or launcher in System Settings > Privacy & Security > Automation.",
+    ],
+    "scan_failed": ["Retry the scan.", "Open diagnostics and verify the reported paths, ports, and permissions."],
+}
 
 
 def abletonosc_online():
@@ -112,6 +139,22 @@ def latency_handler_available():
         return True
     except RuntimeError:
         return False
+
+
+def _latency_handler_check(osc_online):
+    if not osc_online:
+        return False, None
+    try:
+        OSCRequest(timeout=2.0).send("/live/song/export/latency")
+        return True, None
+    except ResponsePortConflict:
+        return False, "response_port_conflict"
+    except RuntimeError as exc:
+        return False, str(exc) or "Latency export handler is unavailable."
+    except TimeoutError:
+        return False, "Timed out waiting for the latency export handler."
+    except Exception as exc:
+        return False, str(exc) or "Latency export handler is unavailable."
     except (TimeoutError, Exception):
         return False
 
@@ -131,27 +174,184 @@ def automation_permission_granted():
         return False
 
 
+def _abletonosc_script_paths():
+    candidates = [
+        Path.home() / "Music" / "Ableton" / "User Library" / "Remote Scripts" / "AbletonOSC",
+        Path.home() / "Music" / "Ableton" / "User Library" / "Remote Scripts" / "AbletonOSC-main",
+    ]
+    return [
+        {
+            "path": str(path),
+            "exists": path.exists(),
+        }
+        for path in candidates
+    ]
+
+
+def _connection_state(live_running, osc_online, osc_error, handler_available, automation_permission):
+    if not live_running:
+        return "live_closed"
+    if osc_error == "port_conflict":
+        return "response_port_conflict"
+    if not osc_online:
+        return "abletonosc_missing"
+    if not handler_available:
+        return "latency_handler_missing"
+    if not automation_permission:
+        return "automation_permission_missing"
+    return "ready"
+
+
+def _diagnostics_payload(status):
+    state = status["connection_state"]
+    return {
+        "state": state,
+        "paths": {
+            "app_root": str(ROOT),
+            "static_dir": str(STATIC_DIR),
+            "default_report": str(REPORT_PATH),
+            "cached_report": str(CACHED_REPORT_PATH),
+            "current_project": (status.get("current_project") or {}).get("path") or "",
+            "abletonosc_candidates": _abletonosc_script_paths(),
+        },
+        "ports": {
+            "abletonosc_host": ABLETONOSC_HOST,
+            "abletonosc_port": ABLETONOSC_PORT,
+            "response_port": RESPONSE_PORT,
+            "web_port_default": WEB_PORT,
+        },
+        "permissions": {
+            "automation": status["automation_permission"],
+        },
+        "checks": {
+            "live_running": status["live_running"],
+            "abletonosc_online": status["abletonosc_online"],
+            "latency_handler_available": status["latency_handler_available"],
+            "report_exists": status["report_exists"],
+        },
+        "errors": {
+            "abletonosc_error": status.get("abletonosc_error"),
+            "latency_handler_error": status.get("latency_handler_error"),
+        },
+        "recovery_actions": RECOVERY_ACTIONS.get(state, RECOVERY_ACTIONS["scan_failed"]),
+    }
+
+
+def build_status_payload(include_cached_report=False):
+    live_running = ableton_running()
+    osc_online, osc_error = _abletonosc_check() if live_running else (False, None)
+    handler_available, handler_error = _latency_handler_check(osc_online)
+    automation_permission = automation_permission_granted() if live_running else False
+    current_project = _get_current_live_set() if live_running else None
+    payload = {
+        "live_running": live_running,
+        "abletonosc_online": osc_online,
+        "latency_handler_available": handler_available,
+        "automation_permission": automation_permission,
+        "report_exists": CACHED_REPORT_PATH.exists(),
+        "last_scan_time": _get_last_scan_time(),
+        "current_project": current_project,
+    }
+    if osc_error:
+        payload["abletonosc_error"] = osc_error
+    if handler_error:
+        payload["latency_handler_error"] = handler_error
+    payload["connection_state"] = _connection_state(
+        live_running,
+        osc_online,
+        osc_error,
+        handler_available,
+        automation_permission,
+    )
+    payload["recovery_actions"] = RECOVERY_ACTIONS.get(payload["connection_state"], RECOVERY_ACTIONS["scan_failed"])
+    payload["diagnostics"] = _diagnostics_payload(payload)
+    if include_cached_report:
+        cached = load_cached_report()
+        if cached:
+            payload["cached_report"] = cached
+    return payload
+
+
 def run_onboarding_checks():
-    checks = {}
-    checks["ableton_running"] = ableton_running()
-
-    if checks["ableton_running"]:
-        checks["abletonosc_reachable"] = abletonosc_online()
-    else:
-        checks["abletonosc_reachable"] = False
-
-    if checks["abletonosc_reachable"]:
-        checks["handler_available"] = latency_handler_available()
-    else:
-        checks["handler_available"] = False
-
-    if checks["ableton_running"]:
-        checks["automation_permission"] = automation_permission_granted()
-    else:
-        checks["automation_permission"] = False
-
-    checks["all_passed"] = all(v for k, v in checks.items() if k != "all_passed")
+    status = build_status_payload()
+    checks = {
+        "ableton_running": status["live_running"],
+        "abletonosc_reachable": status["abletonosc_online"],
+        "handler_available": status["latency_handler_available"],
+        "automation_permission": status["automation_permission"],
+        "connection_state": status["connection_state"],
+        "diagnostics": status["diagnostics"],
+    }
+    checks["all_passed"] = all(checks[k] for k in ("ableton_running", "abletonosc_reachable", "handler_available", "automation_permission"))
     return checks
+
+
+def _get_coreaudio_buffer_size():
+    """Query the default output device buffer frame size via CoreAudio on macOS.
+
+    Enumerates audio devices and reads the buffer frame size from the first
+    device that responds (the value is a global HAL property shared across all
+    devices on macOS).
+    """
+    try:
+        lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("AudioToolbox"))
+    except Exception:
+        return None
+
+    def _fourcc(s):
+        return (ord(s[0]) << 24) | (ord(s[1]) << 16) | (ord(s[2]) << 8) | ord(s[3])
+
+    kAudioObjectSystemObject = 1
+
+    class AudioObjectPropertyAddress(ctypes.Structure):
+        _fields_ = [
+            ("mSelector", ctypes.c_uint32),
+            ("mScope", ctypes.c_uint32),
+            ("mElement", ctypes.c_uint32),
+        ]
+
+    AudioObjectGetPropertyDataSize = lib.AudioObjectGetPropertyDataSize
+    AudioObjectGetPropertyDataSize.argtypes = [
+        ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    AudioObjectGetPropertyDataSize.restype = ctypes.c_int
+
+    AudioObjectGetPropertyData = lib.AudioObjectGetPropertyData
+    AudioObjectGetPropertyData.argtypes = [
+        ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    AudioObjectGetPropertyData.restype = ctypes.c_int
+
+    # List all audio devices
+    addr = AudioObjectPropertyAddress()
+    addr.mSelector = _fourcc("dev#")
+    addr.mScope = 0
+    addr.mElement = 0
+
+    dev_size = ctypes.c_uint32()
+    if AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, ctypes.byref(addr), 0, None, ctypes.byref(dev_size)) != 0:
+        return None
+
+    count = dev_size.value // ctypes.sizeof(ctypes.c_uint32)
+    DeviceIDs = ctypes.c_uint32 * count
+    devices = DeviceIDs()
+    if AudioObjectGetPropertyData(kAudioObjectSystemObject, ctypes.byref(addr), 0, None, ctypes.byref(dev_size), ctypes.byref(devices)) != 0:
+        return None
+
+    # Buffer frame size is a global HAL property — return it from any device
+    for i in range(count):
+        buf_addr = AudioObjectPropertyAddress()
+        buf_addr.mSelector = _fourcc("fsiz")
+        buf_addr.mScope = 1  # output scope
+        buf_addr.mElement = 0
+        buf_size = ctypes.c_uint32()
+        sz = ctypes.c_uint32(ctypes.sizeof(buf_size))
+        if AudioObjectGetPropertyData(devices[i], ctypes.byref(buf_addr), 0, None, ctypes.byref(sz), ctypes.byref(buf_size)) == 0:
+            result = buf_size.value
+            if result > 0:
+                return result
+
+    return None
 
 
 def export_latency_report():
@@ -172,11 +372,44 @@ def export_latency_report():
         report = json.load(fh)
 
     try:
+        CACHED_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(str(output_path), str(CACHED_REPORT_PATH))
     except Exception:
         print(f"Copying latency report to cache failed (non-fatal): {CACHED_REPORT_PATH}")
 
+    # If AbletonOSC handler couldn't provide buffer_size, fall back to CoreAudio
+    if not isinstance(report.get("buffer_size"), (int, float)) or report.get("buffer_size", 0) <= 0:
+        report["buffer_size"] = _get_coreaudio_buffer_size()
+
     return summarize_report(report)
+
+
+def load_cached_report():
+    try:
+        with CACHED_REPORT_PATH.open() as fh:
+            report = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    return summarize_report(report)
+
+
+def scan_error_payload(message, code, status_code=502):
+    status = build_status_payload(include_cached_report=True)
+    payload = {
+        "error": message,
+        "code": code,
+        "connection_state": "scan_failed",
+        "underlying_connection_state": status.get("connection_state"),
+        "diagnostics": status.get("diagnostics"),
+        "recovery_actions": RECOVERY_ACTIONS["scan_failed"],
+    }
+    if payload["diagnostics"]:
+        payload["diagnostics"]["state"] = "scan_failed"
+        payload["diagnostics"]["underlying_state"] = status.get("connection_state")
+        payload["diagnostics"]["recovery_actions"] = RECOVERY_ACTIONS["scan_failed"]
+    if status.get("cached_report"):
+        payload["cached_report"] = status["cached_report"]
+    return status_code, payload
 
 
 PLUGIN_FORMAT_LABELS = (
@@ -201,7 +434,76 @@ def normalize_plugin_key(device):
     return normalize_plugin_name(device.get("device_name"))
 
 
+TRACK_KIND_LABELS = {
+    "audio": "Audio track",
+    "group": "Group",
+    "instrument": "Instrument track",
+    "return": "Return track",
+    "unknown": "Unknown track",
+}
+
+
+def _device_type_value(device):
+    try:
+        return int(device.get("type"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _infer_track_kind(track, devices):
+    name = str(track.get("name") or "").strip()
+    lowered = name.lower()
+    device_types = {_device_type_value(device) for device in devices}
+
+    if 1 in device_types:
+        return "instrument", "device_type"
+
+    if len(name) == 1 and name.isalpha() and name.isupper():
+        return "return", "name"
+
+    if "midi" in lowered or "instrument" in lowered:
+        return "instrument", "name"
+
+    if "audio" in lowered:
+        return "audio", "name"
+
+    if any(token in lowered for token in ("group", "bus", "buss", "submaster", "stem")):
+        return "group", "name"
+
+    compact = name.replace(" ", "")
+    if compact and compact.isupper() and len(compact) > 3 and compact.isalpha():
+        return "group", "name"
+
+    if devices or 2 in device_types:
+        return "audio", "device_type"
+
+    return "unknown", "fallback"
+
+
+def annotate_track_kinds(report):
+    tracks = report.get("tracks", [])
+    devices = report.get("devices", [])
+    devices_by_track = defaultdict(list)
+    for device in devices:
+        devices_by_track[device.get("track_index")].append(device)
+
+    track_kinds = {}
+    for track in tracks:
+        kind, source = _infer_track_kind(track, devices_by_track.get(track.get("index"), []))
+        track["track_kind"] = kind
+        track["track_kind_label"] = TRACK_KIND_LABELS[kind]
+        track["track_kind_source"] = source
+        track_kinds[track.get("index")] = (kind, source)
+
+    for device in devices:
+        kind, source = track_kinds.get(device.get("track_index"), ("unknown", "fallback"))
+        device["track_kind"] = kind
+        device["track_kind_label"] = TRACK_KIND_LABELS[kind]
+        device["track_kind_source"] = source
+
+
 def summarize_report(report):
+    annotate_track_kinds(report)
     groups = {}
     devices = report.get("devices", [])
     for device in devices:
@@ -380,20 +682,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/status":
-            live_running = ableton_running()
-            osc_online, osc_error = _abletonosc_check() if live_running else (False, None)
-            payload = {
-                "live_running": live_running,
-                "abletonosc_online": osc_online,
-                "latency_handler_available": latency_handler_available() if osc_online else False,
-                "automation_permission": automation_permission_granted() if live_running else False,
-                "report_exists": CACHED_REPORT_PATH.exists(),
-                "last_scan_time": _get_last_scan_time(),
-                "current_project": _get_current_live_set(),
-            }
-            if osc_error:
-                payload["abletonosc_error"] = osc_error
-            self.write_json(200, payload)
+            self.write_json(200, build_status_payload(include_cached_report=True))
             return
         if path == "/api/onboarding":
             self.write_json(200, run_onboarding_checks())
@@ -414,17 +703,26 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 self.write_json(200, export_latency_report())
             except ResponsePortConflict as exc:
-                self.write_json(502, {"error": str(exc), "code": "response_port_conflict"})
+                status, payload = scan_error_payload(str(exc), "response_port_conflict")
+                self.write_json(status, payload)
             except TimeoutError:
-                self.write_json(502, {"error": "AbletonOSC is not responding. Is Ableton Live running with AbletonOSC enabled?", "code": "osc_timeout"})
+                status, payload = scan_error_payload(
+                    "AbletonOSC is not responding. Is Ableton Live running with AbletonOSC enabled?",
+                    "osc_timeout",
+                )
+                self.write_json(status, payload)
             except ConnectionRefusedError:
-                self.write_json(502, {"error": "Cannot reach AbletonOSC on port 11000.", "code": "osc_offline"})
+                status, payload = scan_error_payload("Cannot reach AbletonOSC on port 11000.", "osc_offline")
+                self.write_json(status, payload)
             except FileNotFoundError:
-                self.write_json(502, {"error": "Latency report file was not created by AbletonOSC.", "code": "report_not_found"})
+                status, payload = scan_error_payload("Latency report file was not created by AbletonOSC.", "report_not_found")
+                self.write_json(status, payload)
             except json.JSONDecodeError:
-                self.write_json(502, {"error": "Latency report contains invalid JSON.", "code": "invalid_json"})
+                status, payload = scan_error_payload("Latency report contains invalid JSON.", "invalid_json")
+                self.write_json(status, payload)
             except Exception as exc:
-                self.write_json(502, {"error": str(exc), "code": "unknown"})
+                status, payload = scan_error_payload(str(exc), "unknown")
+                self.write_json(status, payload)
             finally:
                 _scan_lock.release()
             return

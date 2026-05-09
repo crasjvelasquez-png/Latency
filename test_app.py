@@ -1,9 +1,15 @@
 import json
+import threading
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
 
 import pytest
 
+import app
 from app import (
     CACHED_REPORT_PATH,
+    Handler,
     normalize_plugin_key,
     normalize_plugin_name,
     summarize_report,
@@ -41,6 +47,44 @@ def _device(**overrides):
     }
     d.update(overrides)
     return d
+
+
+def _http_json(server, path, method="GET", headers=None):
+    url = f"http://{server.server_address[0]}:{server.server_address[1]}{path}"
+    req = urllib.request.Request(url, method=method, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=3) as res:
+            return res.status, json.loads(res.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+@pytest.fixture
+def api_server():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.fixture
+def isolated_cache(tmp_path, monkeypatch):
+    cache_path = tmp_path / "abletonosc-latency-report.json"
+    monkeypatch.setattr(app, "CACHED_REPORT_PATH", cache_path)
+    return cache_path
+
+
+def _mock_status(monkeypatch, *, live=True, osc=True, handler=True, automation=True, osc_error=None):
+    monkeypatch.setattr(app, "ableton_running", lambda: live)
+    monkeypatch.setattr(app, "_abletonosc_check", lambda: (osc, osc_error))
+    monkeypatch.setattr(app, "_latency_handler_check", lambda online: (handler if online else False, None))
+    monkeypatch.setattr(app, "automation_permission_granted", lambda: automation)
+    monkeypatch.setattr(app, "_get_current_live_set", lambda: {"name": "Set.als", "path": "/Sessions/Set.als"})
+    monkeypatch.setattr(app, "_abletonosc_script_paths", lambda: [{"path": "/Remote Scripts/AbletonOSC", "exists": True}])
 
 
 @pytest.fixture
@@ -192,6 +236,105 @@ def null_devices_report():
 def not_a_list_report():
     """Report where 'devices' is a string instead of a list."""
     return {"devices": "not-a-list", "track_count": 0}
+
+
+# ── API status / scan ──
+
+
+def test_api_status_reports_live_closed(api_server, isolated_cache, monkeypatch):
+    _mock_status(monkeypatch, live=False, osc=False, handler=False, automation=False)
+    status, payload = _http_json(api_server, "/api/status")
+
+    assert status == 200
+    assert payload["connection_state"] == "live_closed"
+    assert payload["live_running"] is False
+    assert payload["diagnostics"]["state"] == "live_closed"
+    assert payload["diagnostics"]["paths"]["cached_report"] == str(isolated_cache)
+    assert payload["diagnostics"]["ports"]["abletonosc_port"] == app.ABLETONOSC_PORT
+
+
+def test_api_status_reports_abletonosc_missing(api_server, isolated_cache, monkeypatch):
+    _mock_status(monkeypatch, live=True, osc=False, handler=False, automation=True)
+    status, payload = _http_json(api_server, "/api/status")
+
+    assert status == 200
+    assert payload["connection_state"] == "abletonosc_missing"
+    assert payload["abletonosc_online"] is False
+    assert "Install AbletonOSC" in payload["recovery_actions"][0]
+
+
+def test_api_status_reports_latency_handler_missing(api_server, isolated_cache, monkeypatch):
+    _mock_status(monkeypatch, live=True, osc=True, handler=False, automation=True)
+    status, payload = _http_json(api_server, "/api/status")
+
+    assert status == 200
+    assert payload["connection_state"] == "latency_handler_missing"
+    assert payload["latency_handler_available"] is False
+
+
+def test_api_status_reports_automation_permission_missing(api_server, isolated_cache, monkeypatch):
+    _mock_status(monkeypatch, live=True, osc=True, handler=True, automation=False)
+    status, payload = _http_json(api_server, "/api/status")
+
+    assert status == 200
+    assert payload["connection_state"] == "automation_permission_missing"
+    assert payload["diagnostics"]["permissions"]["automation"] is False
+
+
+def test_api_scan_requires_local_header(api_server):
+    status, payload = _http_json(api_server, "/api/scan", method="POST")
+
+    assert status == 403
+    assert payload["code"] == "forbidden"
+
+
+def test_api_scan_success_returns_summarized_report(api_server, isolated_cache, monkeypatch):
+    report = _base_report(
+        devices=[
+            _device(device_name="Pro-Q 3 (VST3)", latency_samples=128, latency_ms=2.9),
+            _device(device_name="Pro-Q 3 (AU)", latency_samples=64, latency_ms=1.45),
+        ],
+        device_count=2,
+        track_count=1,
+    )
+    monkeypatch.setattr(app, "export_latency_report", lambda: summarize_report(report))
+
+    status, payload = _http_json(
+        api_server,
+        "/api/scan",
+        method="POST",
+        headers={"X-Requested-With": "latency-manager"},
+    )
+
+    assert status == 200
+    assert payload["total_latency_samples"] == 192
+    assert len(payload["plugins"]) == 1
+    assert payload["plugins"][0]["instance_count"] == 2
+
+
+def test_api_scan_failure_keeps_cached_report(api_server, isolated_cache, monkeypatch):
+    cached_report = _base_report(
+        devices=[_device(device_name="Cached Plugin", latency_samples=256, latency_ms=5.8)],
+        device_count=1,
+        track_count=1,
+    )
+    isolated_cache.write_text(json.dumps(cached_report))
+    _mock_status(monkeypatch, live=True, osc=True, handler=True, automation=True)
+    monkeypatch.setattr(app, "export_latency_report", lambda: (_ for _ in ()).throw(TimeoutError()))
+
+    status, payload = _http_json(
+        api_server,
+        "/api/scan",
+        method="POST",
+        headers={"X-Requested-With": "latency-manager"},
+    )
+
+    assert status == 502
+    assert payload["code"] == "osc_timeout"
+    assert payload["connection_state"] == "scan_failed"
+    assert payload["underlying_connection_state"] == "ready"
+    assert payload["cached_report"]["plugins"][0]["device_name"] == "Cached Plugin"
+    assert payload["diagnostics"]["state"] == "scan_failed"
 
 
 # ── normalize_plugin_name ──
