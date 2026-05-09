@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LatencyManager</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="logo-area">
+        <div class="app-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+          </svg>
+        </div>
+        <div>
+          <h1>Latency</h1>
+          <p id="sessionInfo" class="session-info">Detecting open project...</p>
+        </div>
+      </div>
+      <div class="actions">
+        <div id="statusPill" class="status-pill">
+          <span class="dot"></span>
+          <span class="status-text">Checking</span>
+        </div>
+        <div class="auto-refresh">
+          <label class="toggle-switch">
+            <input type="checkbox" id="autoRefreshToggle">
+            <span class="toggle-track"></span>
+            <span>Auto-scan</span>
+          </label>
+          <div class="interval-popdown">
+            <button id="intervalTrigger" class="interval-trigger" type="button">30s</button>
+            <div id="intervalDropdown" class="interval-dropdown">
+              <input type="range" id="refreshInterval" min="5" max="60" value="30" step="1">
+              <span id="intervalValue" class="interval-value">30s</span>
+            </div>
+          </div>
+        </div>
+        <button id="scanButton" class="scan-button" type="button">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; vertical-align: middle;">
+            <circle cx="12" cy="12" r="10"></circle>
+            <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"></path>
+            <path d="M2 12h20"></path>
+          </svg>
+          Scan now
+        </button>
+      </div>
+    </header>
+
+    <section class="info-cards" aria-label="Dashboard summary">
+      <div class="info-card">
+        <div class="info-card-header">
+          <h3>TOTAL PLUGIN LATENCY</h3>
+          <p class="info-card-hint">Sum of delay reported by all devices in the session</p>
+        </div>
+        <div class="info-card-value">
+          <strong id="totalLatencyMs" class="text-red">--</strong><span class="unit">ms</span>
+        </div>
+      </div>
+
+      <div class="info-card">
+        <div class="info-card-header">
+          <h3>BUFFER · SAMPLE RATE</h3>
+        </div>
+        <div class="info-card-value">
+          <strong id="bufferSize">--</strong><span class="unit">/ <span id="sampleRate">--</span></span>
+        </div>
+        <div class="info-card-meta">
+          <span id="trackCount">-- tracks</span> · <span id="totalDevices">-- devices</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <h2>Plug-ins</h2>
+          <div class="legend">
+            <span class="legend-item"><span class="dot green"></span>&lt; 20</span>
+            <span class="legend-item"><span class="dot yellow"></span>20-100</span>
+            <span class="legend-item"><span class="dot red"></span>100+</span>
+          </div>
+        </div>
+        <div class="view-toggle" role="group" aria-label="Group plug-ins by">
+          <button id="byChannelToggle" class="view-toggle-button active" type="button" data-view="channel" aria-pressed="true">By channel</button>
+          <button id="byPluginToggle" class="view-toggle-button" type="button" data-view="plugin" aria-pressed="false">By plug-in</button>
+        </div>
+      </div>
+      <div class="report-toolbar" id="reportToolbar" hidden>
+        <div class="toolbar-left">
+          <div class="search-box">
+            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+            <input type="text" id="searchInput" placeholder="Filter by name or track..." autocomplete="off" spellcheck="false">
+          </div>
+          <div class="sort-control">
+            <label for="sortSelect" class="sort-label">Sort</label>
+            <select id="sortSelect">
+              <option value="latency-desc">Latency (high first)</option>
+              <option value="latency-asc">Latency (low first)</option>
+              <option value="instances-desc">Instances (most)</option>
+            </select>
+          </div>
+        </div>
+        <div class="toolbar-right">
+          <label class="toggle-switch show-all-toggle">
+            <input type="checkbox" id="showAllToggle">
+            <span class="toggle-track"></span>
+            <span>Show all</span>
+          </label>
+          <span id="rowCount" class="row-count"></span>
+          <div class="export-group">
+            <button id="exportJson" class="export-button" type="button">JSON</button>
+            <button id="exportCsv" class="export-button" type="button">CSV</button>
+          </div>
+        </div>
+      </div>
+      <div id="results" class="results empty">
+        <div class="empty-state">
+          <div class="empty-icon">&#9775;</div>
+          <strong>No scan yet</strong>
+          <span>Open your session in Ableton Live, then scan.</span>
+          <div class="recovery-actions">
+            <button class="recovery-btn" onclick="scan({showLoading:true})">Scan now</button>
+            <button class="recovery-btn secondary" onclick="openAbleton()">Open Live</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="onboarding" class="onboarding-overlay" hidden>
+    <div class="onboarding-card">
+      <div class="onboarding-header">
+        <div class="onboarding-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+          </svg>
+        </div>
+        <h2>Setup checklist</h2>
+        <p class="onboarding-subtitle">Complete these steps to start scanning latency.</p>
+      </div>
+
+      <div class="onboarding-steps">
+        <div class="onboarding-step" id="step-ableton">
+          <div class="step-status">
+            <span class="step-icon"></span>
+          </div>
+          <div class="step-body">
+            <strong>Ableton Live</strong>
+            <p class="step-detail step-ok">Running</p>
+            <p class="step-detail step-fail">Not detected. Open Ableton Live and load a project.</p>
+          </div>
+        </div>
+
+        <div class="onboarding-step" id="step-osc">
+          <div class="step-status">
+            <span class="step-icon"></span>
+          </div>
+          <div class="step-body">
+            <strong>AbletonOSC</strong>
+            <p class="step-detail step-ok">Reachable on port 11000</p>
+            <p class="step-detail step-fail">
+              Not reachable. Install the
+              <a href="https://github.com/ideoforms/AbletonOSC" target="_blank" rel="noopener">AbletonOSC</a>
+              MIDI Remote Script into
+              <code>~/Music/Ableton/User Library/Remote Scripts/</code>,
+              then enable it in Live &rarr; Settings &rarr; MIDI.
+            </p>
+          </div>
+        </div>
+
+        <div class="onboarding-step" id="step-handler">
+          <div class="step-status">
+            <span class="step-icon"></span>
+          </div>
+          <div class="step-body">
+            <strong>Latency export handler</strong>
+            <p class="step-detail step-ok">Available</p>
+            <p class="step-detail step-fail">
+              Not found. The <code>/live/song/export/latency</code> handler is missing.
+              Make sure you are using an AbletonOSC build that includes the latency export patch,
+              then run <code>python3 app.py --reload-abletonosc</code>.
+            </p>
+          </div>
+        </div>
+
+        <div class="onboarding-step" id="step-automation">
+          <div class="step-status">
+            <span class="step-icon"></span>
+          </div>
+          <div class="step-body">
+            <strong>macOS Automation permission</strong>
+            <p class="step-detail step-ok">Granted</p>
+            <p class="step-detail step-fail">
+              Not granted. When prompted, allow access so the app can detect
+              the current Live project. You can also enable it in
+              System Settings &rarr; Privacy &amp; Security &rarr; Automation.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="onboarding-actions">
+        <button id="onboardingRecheck" class="onboarding-btn" type="button">Re-check</button>
+        <button id="onboardingDismiss" class="onboarding-btn onboarding-btn-secondary" type="button">Skip for now</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
