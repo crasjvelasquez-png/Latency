@@ -8,7 +8,8 @@ import pytest
 
 import app
 from app import (
-    CACHED_REPORT_PATH,
+    API_APP_ID,
+    API_SCHEMA_VERSION,
     Handler,
     normalize_plugin_key,
     normalize_plugin_name,
@@ -178,7 +179,7 @@ def inactive_devices_report():
 
 
 @pytest.fixture
-def stale_report():
+def stale_report(isolated_cache):
     """A report generated at a known timestamp to validate last-scan-time logic."""
     report = _base_report(
         devices=[_device(device_name="Stale Plugin", latency_samples=64, latency_ms=1.451)],
@@ -186,8 +187,8 @@ def stale_report():
         device_count=1,
     )
     # Write it to the cache path so _get_last_scan_time can read it.
-    CACHED_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CACHED_REPORT_PATH, "w") as fh:
+    app.CACHED_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(app.CACHED_REPORT_PATH, "w") as fh:
         json.dump(report, fh)
     return report
 
@@ -246,6 +247,8 @@ def test_api_status_reports_live_closed(api_server, isolated_cache, monkeypatch)
     status, payload = _http_json(api_server, "/api/status")
 
     assert status == 200
+    assert payload["api_schema_version"] == API_SCHEMA_VERSION
+    assert payload["app_id"] == API_APP_ID
     assert payload["connection_state"] == "live_closed"
     assert payload["live_running"] is False
     assert payload["diagnostics"]["state"] == "live_closed"
@@ -285,7 +288,19 @@ def test_api_scan_requires_local_header(api_server):
     status, payload = _http_json(api_server, "/api/scan", method="POST")
 
     assert status == 403
+    assert payload["api_schema_version"] == API_SCHEMA_VERSION
     assert payload["code"] == "forbidden"
+
+
+def test_api_schema_endpoint_documents_local_contract(api_server):
+    status, payload = _http_json(api_server, "/api/schema")
+
+    assert status == 200
+    assert payload["api_schema_version"] == API_SCHEMA_VERSION
+    assert payload["schema_version"] == API_SCHEMA_VERSION
+    assert payload["app_id"] == API_APP_ID
+    assert payload["transport"] == "local-only"
+    assert "/api/status" in payload["endpoints"]
 
 
 def test_api_scan_success_returns_summarized_report(api_server, isolated_cache, monkeypatch):
@@ -385,6 +400,88 @@ def test_normalize_format_only_name():
 def test_normalize_key():
     assert normalize_plugin_key({"device_name": "Pro-Q 3 (VST3)"}) == "pro-q 3"
     assert normalize_plugin_key({}) == "unnamed device"
+
+
+def test_normalize_strips_version_v_prefix():
+    assert normalize_plugin_name("Plugin v2.1 (VST3)") == "plugin"
+    assert normalize_plugin_name("Plugin v1.2.3.4 (AU)") == "plugin"
+
+
+def test_normalize_strips_version_bare_number():
+    assert normalize_plugin_name("Plugin 2.0.1 (VST3)") == "plugin"
+    assert normalize_plugin_name("Plugin 1.2.3.4 (AU)") == "plugin"
+
+
+def test_normalize_strips_architecture_suffix():
+    assert normalize_plugin_name("Plugin x64 (VST3)") == "plugin"
+    assert normalize_plugin_name("Plugin x86 (AU)") == "plugin"
+
+
+def test_normalize_strips_bitness_suffix():
+    assert normalize_plugin_name("Plugin (64-bit) (VST3)") == "plugin"
+    assert normalize_plugin_name("Plugin (32-bit) (AU)") == "plugin"
+
+
+def test_normalize_strips_build_id():
+    assert normalize_plugin_name("Plugin (Build 12345) (VST3)") == "plugin"
+
+
+def test_normalize_strips_build_date():
+    assert normalize_plugin_name("Plugin 2024.06 (VST3)") == "plugin"
+
+
+def test_normalize_alias_resolves_fabfilter():
+    assert normalize_plugin_name("FabFilter Pro-Q 3") == "pro-q 3"
+    assert normalize_plugin_name("FabFilter Pro-Q 3 (VST3)") == "pro-q 3"
+    assert normalize_plugin_name("FabFilter Pro-Q 3 (AU)") == "pro-q 3"
+    assert normalize_plugin_name("FabFilter Pro-Q 3 [VST3]") == "pro-q 3"
+
+
+def test_normalize_alias_and_non_prefixed_merge():
+    assert normalize_plugin_name("FabFilter Pro-Q 3 (VST3)") == "pro-q 3"
+    assert normalize_plugin_name("Pro-Q 3 (VST3)") == "pro-q 3"
+
+
+def test_normalize_alias_resolves_other_fabfilter():
+    assert normalize_plugin_name("FabFilter Pro-C 2 (VST3)") == "pro-c 2"
+    assert normalize_plugin_name("FabFilter Saturn 2") == "saturn 2"
+    assert normalize_plugin_name("FabFilter Pro-L 2 (AU)") == "pro-l 2"
+
+
+def test_normalize_idempotent():
+    cases = [
+        "Plugin v2.1 (VST3)",
+        "Plugin 1.2.3.4 (AU)",
+        "Plugin x64 (VST3)",
+        "Plugin (64-bit) (VST3)",
+        "Plugin (Build 12345) (VST3)",
+        "Plugin 2024.06 (VST3)",
+        "FabFilter Pro-Q 3 (VST3)",
+        "FabFilter Pro-Q 3",
+        "Pro-Q 3 (VST3)",
+        "Pro-Q 3",
+        "Pro-Q 3 - VST3",
+        "Pro-Q 3 [VST3]",
+        "Pro-Q 3 VST",
+        "plugin",
+        "pro-q 3",
+        "unnamed device",
+        "",
+        None,
+    ]
+    for case in cases:
+        first = normalize_plugin_name(case)
+        second = normalize_plugin_name(first)
+        assert first == second, f"Idempotency failed for {case!r}: {first!r} != {second!r}"
+
+
+def test_normalize_combined_version_and_alias():
+    assert normalize_plugin_name("FabFilter Pro-Q 3 v4.0 (VST3)") == "pro-q 3"
+
+
+def test_normalize_empty_and_none_still_unnamed():
+    assert normalize_plugin_name("") == "unnamed device"
+    assert normalize_plugin_name(None) == "unnamed device"
 
 
 # ── summarize_report: plugin grouping ──
@@ -588,6 +685,57 @@ def test_plugins_sorted_by_max_latency():
     assert ordered == ["B", "C", "A"]
 
 
+def test_impact_score_equals_max_latency_ms_times_instance_count():
+    report = _base_report(
+        devices=[
+            _device(device_name="X", latency_samples=100, latency_ms=5.0),
+            _device(device_name="X", latency_samples=50, latency_ms=2.5),
+            _device(device_name="X", latency_samples=200, latency_ms=10.0),
+        ],
+        device_count=3,
+        track_count=3,
+    )
+    result = summarize_report(report)
+    group = result["plugins"][0]
+    assert group["instance_count"] == 3
+    assert group["max_latency_ms"] == 10.0
+    assert group["impact_score"] == 30.0
+
+
+def test_plugins_sorted_by_impact_score():
+    """30ms x 8 instances (240) beats 50ms x 1 instance (50)."""
+    report = _base_report(
+        devices=[
+            _device(device_name="LowLatencyMany", latency_samples=30, latency_ms=30.0),
+            _device(device_name="LowLatencyMany", latency_samples=30, latency_ms=30.0),
+            _device(device_name="LowLatencyMany", latency_samples=30, latency_ms=30.0),
+            _device(device_name="LowLatencyMany", latency_samples=30, latency_ms=30.0),
+            _device(device_name="LowLatencyMany", latency_samples=30, latency_ms=30.0),
+            _device(device_name="LowLatencyMany", latency_samples=30, latency_ms=30.0),
+            _device(device_name="LowLatencyMany", latency_samples=30, latency_ms=30.0),
+            _device(device_name="LowLatencyMany", latency_samples=30, latency_ms=30.0),
+            _device(device_name="HighLatencyOne", latency_samples=50, latency_ms=50.0),
+        ],
+        device_count=9,
+        track_count=9,
+    )
+    result = summarize_report(report)
+    ordered = [g["device_name"] for g in result["plugins"]]
+    assert ordered == ["LowLatencyMany", "HighLatencyOne"]
+
+
+def test_zero_everything_impact_score_is_zero():
+    report = _base_report(
+        devices=[
+            _device(device_name="Silent", latency_samples=0, latency_ms=0.0),
+        ],
+        device_count=1,
+        track_count=1,
+    )
+    result = summarize_report(report)
+    assert result["plugins"][0]["impact_score"] == 0.0
+
+
 # ── malformed / edge-case reports ──
 
 
@@ -624,8 +772,8 @@ def test_empty_devices_list(empty_report):
 
 
 def test_stale_report_cached_file_readable(stale_report):
-    assert CACHED_REPORT_PATH.exists()
-    with open(CACHED_REPORT_PATH) as fh:
+    assert app.CACHED_REPORT_PATH.exists()
+    with open(app.CACHED_REPORT_PATH) as fh:
         data = json.load(fh)
     assert data["devices"][0]["device_name"] == "Stale Plugin"
 
@@ -724,3 +872,31 @@ def test_summarize_report_enriches_report_in_place():
     assert "latency_device_count" in result
     assert "total_latency_samples" in result
     assert "total_latency_ms" in result
+
+
+# ── /api/last-scan ──
+
+
+def test_api_last_scan_returns_null_when_no_cache(api_server, isolated_cache):
+    status, payload = _http_json(api_server, "/api/last-scan")
+
+    assert status == 200
+    assert payload["api_schema_version"] == API_SCHEMA_VERSION
+    assert payload["report"] is None
+
+
+def test_api_last_scan_returns_cached_report(api_server, isolated_cache):
+    report = _base_report(
+        devices=[_device(device_name="Cached Plugin", latency_samples=256, latency_ms=5.8)],
+        device_count=1,
+        track_count=1,
+    )
+    isolated_cache.write_text(json.dumps(report))
+
+    status, payload = _http_json(api_server, "/api/last-scan")
+
+    assert status == 200
+    assert payload["api_schema_version"] == API_SCHEMA_VERSION
+    assert payload["report"] is not None
+    assert payload["report"]["plugins"][0]["device_name"] == "Cached Plugin"
+    assert payload["report"]["plugins"][0]["instance_count"] == 1

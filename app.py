@@ -6,6 +6,7 @@ import errno
 import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -30,6 +31,8 @@ ABLETONOSC_PORT = 11000
 RESPONSE_PORT = 11001
 WEB_PORT = 8799
 WEB_PORT_MAX = 8899
+API_SCHEMA_VERSION = 1
+API_APP_ID = "latency-manager"
 
 _scan_lock = threading.Lock()
 
@@ -422,11 +425,63 @@ PLUGIN_FORMAT_LABELS = (
 )
 
 
+PLUGIN_NAME_ALIASES = {
+    "fabfilter pro-q 3": "pro-q 3",
+    "fabfilter pro-q 4": "pro-q 4",
+    "fabfilter pro-q": "pro-q",
+    "fabfilter pro-c 2": "pro-c 2",
+    "fabfilter pro-c": "pro-c",
+    "fabfilter pro-l 2": "pro-l 2",
+    "fabfilter pro-l": "pro-l",
+    "fabfilter pro-mb": "pro-mb",
+    "fabfilter pro-ds": "pro-ds",
+    "fabfilter pro-g": "pro-g",
+    "fabfilter pro-r": "pro-r",
+    "fabfilter saturn 2": "saturn 2",
+    "fabfilter saturn": "saturn",
+    "fabfilter timeless 3": "timeless 3",
+    "fabfilter timeless 2": "timeless 2",
+    "fabfilter timeless": "timeless",
+    "fabfilter volcano 3": "volcano 3",
+    "fabfilter volcano 2": "volcano 2",
+    "fabfilter volcano": "volcano",
+    "fabfilter twin 3": "twin 3",
+    "fabfilter twin 2": "twin 2",
+    "fabfilter twin": "twin",
+    "fabfilter one": "one",
+    "fabfilter simplon": "simplon",
+    "fabfilter micro": "micro",
+}
+
+_VERSION_BUILD_RE = [
+    (re.compile(r"\bv\d+(?:\.\d+)*\b", re.IGNORECASE), ""),
+    (re.compile(r"\b\d+(?:\.\d+)+\b"), ""),
+    (re.compile(r"\bx(?:64|86)\b", re.IGNORECASE), ""),
+    (re.compile(r"\(\d{2}-bit\)", re.IGNORECASE), ""),
+    (re.compile(r"\s*\(build\s+\d+\)", re.IGNORECASE), ""),
+]
+
+
 def normalize_plugin_name(name):
     normalized = str(name or "Unnamed Device").strip().lower()
+
+    for pattern, repl in _VERSION_BUILD_RE:
+        normalized = pattern.sub(repl, normalized)
+
+    normalized = " ".join(normalized.split())
+
+    format_stripped = normalized
+    for label in PLUGIN_FORMAT_LABELS:
+        format_stripped = format_stripped.removesuffix(f" ({label})").removesuffix(f" [{label}]")
+        format_stripped = format_stripped.removesuffix(f" - {label}").removesuffix(f" {label}")
+    format_stripped = " ".join(format_stripped.split())
+    if format_stripped in PLUGIN_NAME_ALIASES:
+        normalized = PLUGIN_NAME_ALIASES[format_stripped]
+
     for label in PLUGIN_FORMAT_LABELS:
         normalized = normalized.removesuffix(f" ({label})").removesuffix(f" [{label}]")
         normalized = normalized.removesuffix(f" - {label}").removesuffix(f" {label}")
+
     return " ".join(normalized.split()) or "unnamed device"
 
 
@@ -468,10 +523,6 @@ def _infer_track_kind(track, devices):
         return "audio", "name"
 
     if any(token in lowered for token in ("group", "bus", "buss", "submaster", "stem")):
-        return "group", "name"
-
-    compact = name.replace(" ", "")
-    if compact and compact.isupper() and len(compact) > 3 and compact.isalpha():
         return "group", "name"
 
     if devices or 2 in device_types:
@@ -560,9 +611,13 @@ def summarize_report(report):
             group["tracks"].append(track_label)
         group["instances"].append(instance)
 
+    for group in groups.values():
+        group["impact_score"] = round(group["max_latency_ms"] * group["instance_count"], 3)
+
     ranked = sorted(
         groups.values(),
         key=lambda item: (
+            item["impact_score"],
             item["max_latency_samples"],
             item["total_latency_samples"],
             item["instance_count"],
@@ -665,10 +720,16 @@ class Handler(SimpleHTTPRequestHandler):
         return
 
     def write_json(self, status, payload):
+        payload = dict(payload)
+        payload.setdefault("api_schema_version", API_SCHEMA_VERSION)
+        payload.setdefault("app_id", API_APP_ID)
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(body)
 
@@ -681,11 +742,23 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/api/schema":
+            self.write_json(200, {
+                "schema_version": API_SCHEMA_VERSION,
+                "app_id": API_APP_ID,
+                "transport": "local-only",
+                "endpoints": ["/api/status", "/api/scan", "/api/onboarding", "/api/last-scan"],
+            })
+            return
         if path == "/api/status":
             self.write_json(200, build_status_payload(include_cached_report=True))
             return
         if path == "/api/onboarding":
             self.write_json(200, run_onboarding_checks())
+            return
+        if path == "/api/last-scan":
+            cached = load_cached_report()
+            self.write_json(200, {"report": cached})
             return
         if path == "/":
             self.path = "/index.html"

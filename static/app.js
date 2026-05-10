@@ -1,33 +1,52 @@
 const $ = (id) => document.getElementById(id);
+const api = window.LatencyApi;
+const components = window.LatencyComponents;
 
 const dom = {
   scanButton: $("scanButton"),
   sessionInfo: $("sessionInfo"),
   statusPill: $("statusPill"),
-  totalLatencyMs: $("totalLatencyMs"),
-  bufferSize: $("bufferSize"),
-  sampleRate: $("sampleRate"),
-  trackCount: $("trackCount"),
-  totalDevices: $("totalDevices"),
   results: $("results"),
-  autoRefreshToggle: $("autoRefreshToggle"),
-  intervalTrigger: $("intervalTrigger"),
-  intervalDropdown: $("intervalDropdown"),
-  byChannelToggle: $("byChannelToggle"),
-  byPluginToggle: $("byPluginToggle"),
-  reportToolbar: $("reportToolbar"),
-  searchInput: $("searchInput"),
-  sortSelect: $("sortSelect"),
-  showAllToggle: $("showAllToggle"),
-  rowCount: $("rowCount"),
-  exportJson: $("exportJson"),
-  exportCsv: $("exportCsv"),
-  exportToast: $("exportToast"),
-  shell: document.querySelector(".app-shell"),
   scanTimestamp: $("scanTimestamp"),
-  diagnosticsSummary: $("diagnosticsSummary"),
-  diagnosticsBody: $("diagnosticsBody"),
+  sessionSkeletons: $("sessionSkeletons"),
+  timestampSkeleton: $("timestampSkeleton"),
+  diagnosticsSkeletons: $("diagnosticsSkeletons"),
 };
+
+let _domDeferred = null;
+function getDom() {
+  if (_domDeferred) return _domDeferred;
+  _domDeferred = {
+    ...dom,
+    totalLatencyMs: $("totalLatencyMs"),
+    bufferSize: $("bufferSize"),
+    sampleRate: $("sampleRate"),
+    trackCount: $("trackCount"),
+    totalDevices: $("totalDevices"),
+    autoRefreshToggle: $("autoRefreshToggle"),
+    intervalTrigger: $("intervalTrigger"),
+    intervalDropdown: $("intervalDropdown"),
+    byChannelToggle: $("byChannelToggle"),
+    byPluginToggle: $("byPluginToggle"),
+    reportToolbar: $("reportToolbar"),
+    searchInput: $("searchInput"),
+    sortSelect: $("sortSelect"),
+    showAllToggle: $("showAllToggle"),
+    rowCount: $("rowCount"),
+    exportJson: $("exportJson"),
+    exportCsv: $("exportCsv"),
+    exportToast: $("exportToast"),
+    shell: document.querySelector(".app-shell"),
+    diagnosticsSummary: $("diagnosticsSummary"),
+    diagnosticsBody: $("diagnosticsBody"),
+    compareToggle: $("compareToggle"),
+    sessionInfo: $("sessionInfo"),
+    timestampSkeleton: $("timestampSkeleton"),
+    sessionSkeletons: $("sessionSkeletons"),
+    diagnosticsSkeletons: $("diagnosticsSkeletons"),
+  };
+  return _domDeferred;
+}
 
 const state = {
   scanning: false,
@@ -47,13 +66,239 @@ const state = {
   searchQuery: "",
   sortKey: "latency-desc",
   showAll: false,
+  compare: false,
+  previousReport: null,
   scanAbort: null,
   statusAbort: null,
   exportToastTimer: null,
+  currentView: "scan",
+  viewScrollPositions: new Map(),
+  transitioning: false,
 };
 
 const activeTweens = new Map();
 let tweenFrameId = null;
+
+// ── Virtualization ──
+
+const VIRTUAL_ROW_HEIGHT = 72;
+const VIRTUAL_ROW_GAP = 12;
+const VIRTUAL_BUFFER = 5;
+
+const virtual = {
+  rows: [],
+  heightCache: new Map(),
+  spacer: null,
+  scrollTop: 0,
+  viewportHeight: 0,
+  active: false,
+  focusedKey: null,
+};
+
+function rowY(index) {
+  let y = 0;
+  for (let i = 0; i < index; i++) {
+    y += (virtual.heightCache.get(i) || VIRTUAL_ROW_HEIGHT) + VIRTUAL_ROW_GAP;
+  }
+  return y;
+}
+
+function totalHeight() {
+  let h = 0;
+  for (let i = 0; i < virtual.rows.length; i++) {
+    h += (virtual.heightCache.get(i) || VIRTUAL_ROW_HEIGHT) + VIRTUAL_ROW_GAP;
+  }
+  return Math.max(0, h - VIRTUAL_ROW_GAP);
+}
+
+function setupVirtualization() {
+  if (virtual.spacer) virtual.spacer.remove();
+  virtual.spacer = document.createElement("div");
+  virtual.spacer.className = "results-virtual-spacer";
+  dom.results.appendChild(virtual.spacer);
+  virtual.active = true;
+}
+
+function teardownVirtualization() {
+  if (virtual.spacer) {
+    virtual.spacer.remove();
+    virtual.spacer = null;
+  }
+  virtual.active = false;
+  virtual.heightCache.clear();
+}
+
+function renderVisibleRows() {
+  if (!virtual.active || !virtual.rows.length) return;
+
+  const st = dom.results.scrollTop;
+  const vh = dom.results.clientHeight;
+  if (st === virtual.scrollTop && vh === virtual.viewportHeight) return;
+  virtual.scrollTop = st;
+  virtual.viewportHeight = vh;
+
+  const focused = dom.results.querySelector(".plugin-row:focus-within");
+  if (focused) virtual.focusedKey = focused.dataset.key;
+
+  let cumulative = 0;
+  let start = 0;
+  for (let i = 0; i < virtual.rows.length; i++) {
+    const h = (virtual.heightCache.get(i) || VIRTUAL_ROW_HEIGHT) + VIRTUAL_ROW_GAP;
+    if (cumulative + h > st) { start = Math.max(0, i - VIRTUAL_BUFFER); break; }
+    cumulative += h;
+  }
+
+  cumulative = 0;
+  let end = virtual.rows.length - 1;
+  for (let i = 0; i < virtual.rows.length; i++) {
+    const h = (virtual.heightCache.get(i) || VIRTUAL_ROW_HEIGHT) + VIRTUAL_ROW_GAP;
+    if (cumulative > st + vh) { end = Math.min(virtual.rows.length - 1, i + VIRTUAL_BUFFER); break; }
+    cumulative += h;
+  }
+
+  const nextKeys = new Set();
+  for (let i = start; i <= end; i++) {
+    const item = virtual.rows[i];
+    const key = item.key;
+    nextKeys.add(key);
+
+    let row = dom.results.querySelector(`.plugin-row[data-key="${CSS.escape(key)}"]`);
+    if (!row) {
+      row = createPluginRow(item, virtual.maxSamples);
+      row.classList.add("virtualized");
+    }
+
+    const y = rowY(i);
+    row.style.top = y + "px";
+
+    if (row._virtual_index == null || row._virtual_index !== i) {
+      updatePluginRow(row, item, virtual.maxSamples);
+      row._virtual_index = i;
+    }
+
+    if (row.parentNode !== dom.results) dom.results.appendChild(row);
+  }
+
+  dom.results.querySelectorAll(".plugin-row.virtualized").forEach((row) => {
+    if (!nextKeys.has(row.dataset.key)) row.remove();
+  });
+
+  if (virtual.focusedKey && nextKeys.has(virtual.focusedKey)) {
+    const rowToFocus = dom.results.querySelector(`.plugin-row[data-key="${CSS.escape(virtual.focusedKey)}"]`);
+    if (rowToFocus) {
+      const focusable = rowToFocus.querySelector(".plugin-toggle") || rowToFocus;
+      focusable.focus();
+    }
+    virtual.focusedKey = null;
+  }
+
+  if (virtual.spacer) virtual.spacer.style.height = totalHeight() + "px";
+}
+
+function scheduleRenderVisible() {
+  if (!virtual._raf) {
+    virtual._raf = requestAnimationFrame(() => {
+      virtual._raf = null;
+      renderVisibleRows();
+    });
+  }
+}
+
+function onResultsScroll() {
+  scheduleRenderVisible();
+}
+
+function measureRowHeight(row) {
+  return row.offsetHeight || VIRTUAL_ROW_HEIGHT;
+}
+
+function refreshVirtualHeights() {
+  dom.results.querySelectorAll(".plugin-row.virtualized").forEach((row) => {
+    const idx = row._virtual_index;
+    if (idx != null) virtual.heightCache.set(idx, measureRowHeight(row));
+  });
+  if (virtual.spacer) virtual.spacer.style.height = totalHeight() + "px";
+}
+
+const FLIP_DURATION = 200;
+const FLIP_EASING = "ease-out";
+const VIEW_TRANSITION_DURATION = 180;
+const reducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function getRect(el) {
+  return el.getBoundingClientRect();
+}
+
+function rowSortNumber(row) {
+  if (hasNumericValue(row.track_number)) return Number(row.track_number);
+  const match = String(row.title || "").match(/^\s*(\d+)\./);
+  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+}
+
+function compareRowsByStableLabel(a, b) {
+  const byTrack = rowSortNumber(a) - rowSortNumber(b);
+  if (byTrack) return byTrack;
+  return String(a.title || "").localeCompare(String(b.title || ""), undefined, { numeric: true, sensitivity: "base" });
+}
+
+function resetRowAnimation(row) {
+  if (!row) return;
+  if (row._flipCleanup) row._flipCleanup();
+  row.style.transition = "";
+  row.style.opacity = "";
+  row.style.transform = "";
+  row.classList.remove("flip-animating");
+}
+
+function applyFlipAnimation(row, fromRect, toRect, action) {
+  if (reducedMotion) return;
+
+  resetRowAnimation(row);
+  row.classList.add("flip-animating");
+
+  if (action === "add") {
+    row.style.opacity = "0";
+    row.style.transform = `translateY(12px)`;
+    row.offsetHeight;
+    row.style.transition = `opacity ${FLIP_DURATION}ms ${FLIP_EASING}, transform ${FLIP_DURATION}ms ${FLIP_EASING}`;
+    row.style.opacity = "1";
+    row.style.transform = "translateY(0)";
+  } else if (action === "remove") {
+    row.style.transition = `opacity ${FLIP_DURATION}ms ${FLIP_EASING}, transform ${FLIP_DURATION}ms ${FLIP_EASING}`;
+    row.style.opacity = "0";
+    row.style.transform = `translateY(-8px)`;
+  } else if (action === "move" && fromRect && toRect) {
+    const dx = fromRect.left - toRect.left;
+    const dy = fromRect.top - toRect.top;
+    if (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) {
+      row.classList.remove("flip-animating");
+      return;
+    }
+    row.style.transition = "none";
+    row.style.transform = `translate(${dx}px, ${dy}px)`;
+    row.offsetHeight;
+    row.style.transition = `transform ${FLIP_DURATION}ms ${FLIP_EASING}`;
+    row.style.transform = "translate(0, 0)";
+  }
+
+  const cleanup = () => {
+    row.removeEventListener("transitionend", cleanup);
+    if (row._flipTimer) {
+      clearTimeout(row._flipTimer);
+      row._flipTimer = null;
+    }
+    row._flipCleanup = null;
+    row.style.transition = "";
+    if (action !== "remove") {
+      row.style.opacity = "";
+      row.style.transform = "";
+    }
+    row.classList.remove("flip-animating");
+  };
+  row._flipCleanup = cleanup;
+  row.addEventListener("transitionend", cleanup);
+  row._flipTimer = setTimeout(cleanup, FLIP_DURATION + 50);
+}
 
 // ── Utilities ──
 
@@ -82,15 +327,73 @@ function getFocusableElements(container) {
   ).filter((el) => !el.disabled && el.offsetParent !== null);
 }
 
+var PLUGIN_NAME_ALIASES = {
+  "fabfilter pro-q 3": "pro-q 3",
+  "fabfilter pro-q 4": "pro-q 4",
+  "fabfilter pro-q": "pro-q",
+  "fabfilter pro-c 2": "pro-c 2",
+  "fabfilter pro-c": "pro-c",
+  "fabfilter pro-l 2": "pro-l 2",
+  "fabfilter pro-l": "pro-l",
+  "fabfilter pro-mb": "pro-mb",
+  "fabfilter pro-ds": "pro-ds",
+  "fabfilter pro-g": "pro-g",
+  "fabfilter pro-r": "pro-r",
+  "fabfilter saturn 2": "saturn 2",
+  "fabfilter saturn": "saturn",
+  "fabfilter timeless 3": "timeless 3",
+  "fabfilter timeless 2": "timeless 2",
+  "fabfilter timeless": "timeless",
+  "fabfilter volcano 3": "volcano 3",
+  "fabfilter volcano 2": "volcano 2",
+  "fabfilter volcano": "volcano",
+  "fabfilter twin 3": "twin 3",
+  "fabfilter twin 2": "twin 2",
+  "fabfilter twin": "twin",
+  "fabfilter one": "one",
+  "fabfilter simplon": "simplon",
+  "fabfilter micro": "micro",
+};
+
+var FORMAT_RE = /\s*\((audio unit|au|vst|vst2|vst3|vst\/vst3)\)\s*$/i;
+var FORMAT_BRACKET_RE = /\s*\[(audio unit|au|vst|vst2|vst3|vst\/vst3)\]\s*$/i;
+var FORMAT_DASH_RE = /\s*-\s*(audio unit|au|vst|vst2|vst3|vst\/vst3)\s*$/i;
+var FORMAT_SPACE_RE = /\s+(audio unit|au|vst|vst2|vst3|vst\/vst3)\s*$/i;
+
+function stripFormat(name) {
+  return name
+    .replace(FORMAT_RE, "")
+    .replace(FORMAT_BRACKET_RE, "")
+    .replace(FORMAT_DASH_RE, "")
+    .replace(FORMAT_SPACE_RE, "")
+    .replace(/\s+/g, " ").trim();
+}
+
+function displayPluginName(name) {
+  return stripFormat(String(name || "Unnamed Device").trim()) || "Unnamed Device";
+}
+
 function pluginKey(plugin) {
-  return String(plugin.device_name || "Unnamed Device")
+  var name = String(plugin.device_name || "Unnamed Device")
     .trim()
-    .toLowerCase()
-    .replace(/\s*\((audio unit|au|vst|vst2|vst3|vst\/vst3)\)\s*$/i, "")
-    .replace(/\s*\[(audio unit|au|vst|vst2|vst3|vst\/vst3)\]\s*$/i, "")
-    .replace(/\s*-\s*(audio unit|au|vst|vst2|vst3|vst\/vst3)\s*$/i, "")
-    .replace(/\s+(audio unit|au|vst|vst2|vst3|vst\/vst3)\s*$/i, "")
-    .replace(/\s+/g, " ") || "unnamed device";
+    .toLowerCase();
+
+  name = name
+    .replace(/\bv\d+(?:\.\d+)*\b/gi, "")
+    .replace(/\b\d+(?:\.\d+)+\b/g, "")
+    .replace(/\bx(?:64|86)\b/gi, "")
+    .replace(/\(\d{2}-bit\)/gi, "")
+    .replace(/\s*\(build\s+\d+\)/gi, "")
+    .replace(/\s+/g, " ").trim();
+
+  var formatStripped = stripFormat(name);
+  if (PLUGIN_NAME_ALIASES[formatStripped]) {
+    name = PLUGIN_NAME_ALIASES[formatStripped];
+  }
+
+  name = stripFormat(name);
+
+  return name || "unnamed device";
 }
 
 function hasNumericValue(value) {
@@ -124,6 +427,49 @@ function trackKindLabel(value) {
 
 function stopTween(el) {
   activeTweens.delete(el);
+}
+
+const CROSSFADE_MS = 150;
+
+function revealContent(contentEls, skeletonEls) {
+  const contentArr = Array.isArray(contentEls) ? contentEls : [contentEls];
+  const skeletonArr = Array.isArray(skeletonEls) ? skeletonEls : [skeletonEls];
+
+  skeletonArr.forEach((el) => {
+    if (!el) return;
+    el.style.transition = `opacity ${CROSSFADE_MS}ms ease`;
+    el.style.opacity = "0";
+    el.addEventListener("transitionend", () => {
+      el.hidden = true;
+      el.style.opacity = "";
+      el.style.transition = "";
+    }, { once: true });
+  });
+
+  contentArr.forEach((el) => {
+    if (!el) return;
+    el.hidden = false;
+    el.classList.add("skeleton-fade-enter");
+    el.addEventListener("animationend", () => {
+      el.classList.remove("skeleton-fade-enter");
+    }, { once: true });
+  });
+}
+
+function showSkeletons(skeletonEls, contentEls) {
+  const skeletonArr = Array.isArray(skeletonEls) ? skeletonEls : [skeletonEls];
+  const contentArr = Array.isArray(contentEls) ? contentEls : [contentEls];
+
+  contentArr.forEach((el) => {
+    if (!el) return;
+    el.hidden = true;
+  });
+
+  skeletonArr.forEach((el) => {
+    if (!el) return;
+    el.hidden = false;
+    el.style.opacity = "1";
+  });
 }
 
 function runTweens(now) {
@@ -182,9 +528,7 @@ const RECOVERY_TIMEOUT_MS = 5000;
 function openAbleton() {
   const controller = new AbortController();
   setTimeout(() => controller.abort(), RECOVERY_TIMEOUT_MS);
-  fetch("/api/open-ableton", {
-    method: "POST",
-    headers: { "X-Requested-With": "latency-manager" },
+  api.localPost("/api/open-ableton", {
     signal: controller.signal,
   }).catch(() => {});
 }
@@ -193,9 +537,7 @@ async function reloadOSC() {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), RECOVERY_TIMEOUT_MS);
   try {
-    const res = await fetch("/api/reload-osc", {
-      method: "POST",
-      headers: { "X-Requested-With": "latency-manager" },
+    const { res } = await api.localPost("/api/reload-osc", {
       signal: controller.signal,
     });
     if (res.ok) setTimeout(() => scan({ showLoading: true }), 1500);
@@ -252,8 +594,12 @@ function setScanningPill(active, background = false) {
 }
 
 function setCurrentProject(project) {
-  dom.sessionInfo.textContent = project?.name || "No Ableton project detected";
-  dom.sessionInfo.title = project?.path || "";
+  const name = project?.name || "No Ableton project detected";
+  if (dom.sessionInfo.textContent !== name || dom.sessionInfo.hidden) {
+    dom.sessionInfo.textContent = name;
+    dom.sessionInfo.title = project?.path || "";
+    revealContent(dom.sessionInfo, getDom().sessionSkeletons);
+  }
 }
 
 function diagnosticsValue(value) {
@@ -266,8 +612,12 @@ function diagnosticsValue(value) {
 function renderDiagnostics(diagnostics) {
   state.diagnostics = diagnostics;
   if (!diagnostics) return;
+  const d = getDom();
+  if (d.diagnosticsSkeletons && !d.diagnosticsSkeletons.hidden) {
+    revealContent(d.diagnosticsBody, d.diagnosticsSkeletons);
+  }
   const stateLabel = CONNECTION_LABELS[diagnostics.state] || diagnostics.state || "Unknown";
-  dom.diagnosticsSummary.textContent = stateLabel;
+  d.diagnosticsSummary.textContent = stateLabel;
   const candidates = diagnostics.paths?.abletonosc_candidates || [];
   const candidateRows = candidates.map((item) => `
     <div class="diagnostics-row">
@@ -276,7 +626,7 @@ function renderDiagnostics(diagnostics) {
       <strong>${item.exists ? "Found" : "Missing"}</strong>
     </div>`).join("");
   const actions = (diagnostics.recovery_actions || []).map((action) => `<li>${escapeHtml(action)}</li>`).join("");
-  dom.diagnosticsBody.innerHTML = `
+  d.diagnosticsBody.innerHTML = `
     <div class="diagnostics-grid">
       <div class="diagnostics-row"><span>State</span><code>${escapeHtml(stateLabel)}</code></div>
       <div class="diagnostics-row"><span>Live running</span><code>${diagnosticsValue(diagnostics.checks?.live_running)}</code></div>
@@ -308,8 +658,7 @@ async function refreshStatus() {
   state.statusAbort = controller;
   const timeoutId = setTimeout(() => controller.abort(), STATUS_TIMEOUT_MS);
   try {
-    const res = await fetch("/api/status", { signal: controller.signal });
-    const data = await res.json();
+    const { data } = await api.request("/api/status", { signal: controller.signal });
     state.liveRunning = data.live_running;
     state.latencyHandlerAvailable = data.latency_handler_available;
     state.automationPermission = data.automation_permission;
@@ -338,38 +687,30 @@ async function refreshStatus() {
 // ── Rendering ──
 
 function renderLoading() {
-  dom.results.className = "results";
-  let rows = "";
-  for (let i = 0; i < 5; i++) {
-    rows += `<div class="shimmer-row"></div>`;
-  }
-  dom.results.innerHTML = rows;
+  dom.results.className = "results loading";
+  dom.results.dataset.state = "loading";
+  dom.results.innerHTML = `
+    <div class="skeleton skeleton-row"></div>
+    <div class="skeleton skeleton-row"></div>
+    <div class="skeleton skeleton-row"></div>
+    <div class="skeleton skeleton-row"></div>
+    <div class="skeleton skeleton-row"></div>`;
 }
 
 function renderStateCard(state, opts = {}) {
   const el = dom.results;
   el.className = "results empty";
+  el.dataset.state = "";
 
-  const hasIcon = ["empty", "offline", "error", "success"].includes(state);
-
-  let html = `<div class="state-card" data-state="${escapeHtml(state)}">`;
-  if (hasIcon) html += `<div class="state-card__icon"></div>`;
-  if (opts.title) html += `<h2 class="state-card__title">${escapeHtml(opts.title)}</h2>`;
-  if (opts.description) html += `<p class="state-card__description">${escapeHtml(opts.description)}</p>`;
-  if (opts.errorMessage) html += `<div class="state-card__error">${escapeHtml(opts.errorMessage)}</div>`;
-  if (opts.actionsHtml) html += `<div class="state-card__actions">${opts.actionsHtml}</div>`;
-  if (opts.childrenHtml) html += opts.childrenHtml;
-  html += `</div>`;
-
-  el.innerHTML = html;
+  el.innerHTML = components.stateCard(state, opts);
 }
 
 function renderEmpty() {
   renderStateCard("empty", {
     title: "No scan yet",
     description: "Open your session in Ableton Live, then scan to detect latency-inducing devices.",
-    actionsHtml: `<button class="recovery-btn" onclick="scan({showLoading:true})">Scan now</button>
-      <button class="recovery-btn secondary" onclick="openAbleton()">Open Live</button>`,
+    actionsHtml: `${components.actionButton("scan", "Scan now")}
+      ${components.actionButton("open-ableton", "Open Live", "secondary")}`,
   });
 }
 
@@ -377,10 +718,10 @@ function renderOffline() {
   renderStateCard("offline", {
     title: "AbletonOSC is offline",
     description: "Make sure Ableton Live is running with AbletonOSC installed and enabled. Port 11000 must be reachable.",
-    actionsHtml: `<button class="recovery-btn" onclick="openAbleton()">Open Live</button>
-      <button class="recovery-btn secondary" onclick="reloadOSC()">Retry connection</button>`,
+    actionsHtml: `${components.actionButton("open-ableton", "Open Live")}
+      ${components.actionButton("reload-osc", "Retry connection", "secondary")}`,
     childrenHtml: `<div class="recovery-secondary">
-      <button class="text-link" onclick="scan({showLoading:true})">Scan anyway</button>
+      <button class="text-link" type="button" data-action="scan">Scan anyway</button>
       <span class="secondary-hint">— only works if AbletonOSC is already running</span>
     </div>`,
   });
@@ -390,8 +731,8 @@ function renderError(message) {
   renderStateCard("error", {
     title: "Scan failed",
     errorMessage: message,
-    actionsHtml: `<button class="recovery-btn" onclick="scan({showLoading:true})">Retry scan</button>
-      <button class="recovery-btn secondary" onclick="reloadOSC()">Reload AbletonOSC</button>`,
+    actionsHtml: `${components.actionButton("scan", "Retry scan")}
+      ${components.actionButton("reload-osc", "Reload AbletonOSC", "secondary")}`,
   });
 }
 
@@ -423,16 +764,19 @@ function updateScanTimestamp() {
     label = `${Math.floor(diffSec / 86400)}d ago`;
   }
   el.innerHTML = `Scanned <time datetime="${state.lastScanTime.toISOString()}">${label}</time>`;
+  if (el.hidden) {
+    revealContent(el, getDom().timestampSkeleton);
+  }
 }
 
 function setTotalLatencySeverity(totalLatencyMs) {
   if (!hasNumericValue(totalLatencyMs)) {
-    dom.totalLatencyMs.style.color = "";
+    getDom().totalLatencyMs.style.color = "";
     return false;
   }
 
   const latencyClass = getLatencyClass(0, Number(totalLatencyMs));
-  dom.totalLatencyMs.style.color = latencyClass === "high"
+  getDom().totalLatencyMs.style.color = latencyClass === "high"
     ? "var(--red)"
     : latencyClass === "medium"
       ? "var(--amber)"
@@ -440,81 +784,64 @@ function setTotalLatencySeverity(totalLatencyMs) {
   return true;
 }
 
-function renderTrackDetails(instances, { nameLabel = "Track name", numberLabel = "" } = {}) {
-  const hasNumberCol = Boolean(numberLabel);
-  const colClass = hasNumberCol ? "" : " two-col";
-  const rows = instances
-    .slice()
-    .sort((a, b) => Number(b.latency_samples || 0) - Number(a.latency_samples || 0))
-    .map((inst) => {
-      const activeClass = inst.active === true ? "active" : "";
-      const activeText = inst.active === true ? "Active" : inst.active === false ? "Inactive" : "Unknown";
-      return `
-        <div class="track-item${colClass}">
-          <div class="track-name">
-            ${escapeHtml(inst.detail_name || inst.track_name || "Unnamed Track")}
-            <span class="track-status ${activeClass}">${activeText}</span>
-          </div>
-          ${hasNumberCol ? `<div class="track-number">${escapeHtml(inst.detail_number ?? trackNumber(inst))}</div>` : ""}
-          <div class="track-latency">
-            ${fmtMs(inst.latency_ms)} ms
-          </div>
-        </div>`;
-    })
-    .join("");
-
-  return `
-    <div class="track-details-header${colClass}">
-      <span class="header-name">${escapeHtml(nameLabel)}</span>
-      ${hasNumberCol ? `<span class="header-number">${escapeHtml(numberLabel)}</span>` : ""}
-      <span class="header-latency">Latency</span>
-    </div>
-    ${rows}`;
+function renderTrackDetails(instances, { nameLabel = "Track name", numberLabel = "" } = {}, previousReport = null, currentDeviceName = null) {
+  let withDeltas = instances.map((inst) => ({ ...inst, track_number: trackNumber(inst) }));
+  if (previousReport && currentDeviceName) {
+    const prevInstanceMap = _previousInstanceMap(pluginKey({ device_name: currentDeviceName }));
+    withDeltas = withDeltas.map((inst) => {
+      const instKey = `${inst.device_name || ""}|${inst.track_index}`;
+      const prevInst = prevInstanceMap.get(instKey);
+      let deltaHtml = "";
+      if (prevInst) {
+        const delta = Number(inst.latency_ms || 0) - Number(prevInst.latency_ms || 0);
+        if (Math.abs(delta) > 0.005) {
+          const sign = delta > 0 ? "+" : "";
+          const cls = delta > 0 ? "positive" : "negative";
+          deltaHtml = ` <span class="delta-badge ${cls}">${sign}${delta.toFixed(2)} ms</span>`;
+        }
+      } else {
+        deltaHtml = ` <span class="delta-badge new">new</span>`;
+      }
+      return { ...inst, _delta_html: deltaHtml, track_number: trackNumber(inst) };
+    });
+  }
+  return components.trackDetails(withDeltas, { nameLabel, numberLabel, formatLatency: fmtMs });
 }
 
 function updateDashboardStats(report) {
-  if (setTotalLatencySeverity(report.total_latency_ms)) {
-    tweenText(dom.totalLatencyMs, Number(report.total_latency_ms), fmtMs);
+  const d = getDom();
+  const hasLatency = setTotalLatencySeverity(report.total_latency_ms);
+  if (hasLatency) {
+    tweenText(d.totalLatencyMs, Number(report.total_latency_ms), fmtMs);
   } else {
-    stopTween(dom.totalLatencyMs);
-    dom.totalLatencyMs.textContent = "--";
-    delete dom.totalLatencyMs.dataset.value;
+    stopTween(d.totalLatencyMs);
+    d.totalLatencyMs.textContent = "--";
+    delete d.totalLatencyMs.dataset.value;
   }
   if (hasNumericValue(report.buffer_size)) {
-    tweenText(dom.bufferSize, Number(report.buffer_size), (n) => String(Math.round(n)));
+    tweenText(d.bufferSize, Number(report.buffer_size), (n) => String(Math.round(n)));
   } else {
-    dom.bufferSize.textContent = "--";
+    d.bufferSize.textContent = "--";
   }
   if (hasNumericValue(report.sample_rate)) {
-    tweenText(dom.sampleRate, Number(report.sample_rate) / 1000, (n) => (n ? `${n.toFixed(1)}k` : "--"));
+    tweenText(d.sampleRate, Number(report.sample_rate) / 1000, (n) => (n ? `${n.toFixed(1)}k` : "--"));
   } else {
-    dom.sampleRate.textContent = "--";
+    d.sampleRate.textContent = "--";
   }
-  tweenText(dom.trackCount, Number(report.track_count || 0), (n) => String(Math.round(n)));
-  tweenText(dom.totalDevices, Number(report.device_count || 0), (n) => String(Math.round(n)));
+  tweenText(d.trackCount, Number(report.track_count || 0), (n) => String(Math.round(n)));
+  tweenText(d.totalDevices, Number(report.device_count || 0), (n) => String(Math.round(n)));
+
+  const anyValueVisible = hasLatency || hasNumericValue(report.buffer_size) || hasNumericValue(report.sample_rate);
+  if (anyValueVisible) {
+    revealContent([d.totalLatencyMs, d.bufferSize, d.sampleRate, d.trackCount, d.totalDevices], []);
+  }
 }
 
 function createPluginRow(item, maxSessionSamples) {
   const row = document.createElement("article");
   row.className = "plugin-row";
   row.dataset.key = item.key;
-  row.innerHTML = `
-    <div class="plugin-main">
-      <div class="plugin-info">
-        <span class="plugin-name"></span>
-        <div class="plugin-tracks"></div>
-      </div>
-      <div class="plugin-bar-container">
-        <div class="latency-bar"></div>
-      </div>
-      <div class="plugin-latency-val">
-        <span class="latency-number"></span> <span class="latency-unit">ms</span>
-      </div>
-      <button class="plugin-toggle" type="button" aria-label="Toggle details" aria-expanded="false">
-        <span class="icon-chevron" aria-hidden="true"></span>
-      </button>
-    </div>
-    <div class="track-details"></div>`;
+  row.innerHTML = components.pluginRowShell();
   updatePluginRow(row, item, maxSessionSamples);
   return row;
 }
@@ -527,19 +854,56 @@ function updatePluginRow(row, item, maxSessionSamples) {
   const barEl = row.querySelector(".latency-bar");
   const latencyEl = row.querySelector(".plugin-latency-val");
   const latencyNumberEl = row.querySelector(".latency-number");
+  const deltaEl = row.querySelector(".delta-badge");
   const detailsEl = row.querySelector(".track-details");
   const name = item.title || "Unnamed";
   const subtitle = item.subtitle || "";
+  const subtitleKind = item.subtitle_kind || "";
 
   if (nameEl.textContent !== name) nameEl.textContent = name;
   nameEl.title = name;
-  if (tracksEl.textContent !== subtitle) tracksEl.textContent = subtitle;
+  if (subtitleKind && subtitle) {
+    const subtitleHtml = `<span class="track-kind ${escapeHtml(subtitleKind)}">${escapeHtml(subtitle)}</span>`;
+    if (tracksEl.innerHTML !== subtitleHtml) tracksEl.innerHTML = subtitleHtml;
+  } else if (tracksEl.textContent !== subtitle) {
+    tracksEl.textContent = subtitle;
+  }
   tracksEl.title = subtitle;
   barEl.className = `latency-bar ${latencyClass}`;
   barEl.style.width = `${widthPercent}%`;
   latencyEl.className = `plugin-latency-val ${latencyClass}`;
   latencyNumberEl.textContent = fmtMs(item.latency_ms);
-  const detailsHtml = renderTrackDetails(item.instances || [], item.details || {});
+
+  if (deltaEl) {
+    let deltaHtml = "";
+    if (state.compare && state.previousReport) {
+      const prevMap = _previousPluginMap();
+      const key = pluginKey({ device_name: item.title });
+      const prev = prevMap.get(key);
+      if (prev) {
+        const delta = Number(item.latency_ms) - Number(prev.max_latency_ms);
+        if (Math.abs(delta) > 0.005) {
+          const sign = delta > 0 ? "+" : "";
+          const cls = delta > 0 ? "positive" : "negative";
+          deltaEl.innerHTML = `${sign}${delta.toFixed(2)} ms`;
+          deltaEl.className = `delta-badge ${cls}`;
+          deltaEl.hidden = false;
+        } else {
+          deltaEl.hidden = true;
+        }
+      } else {
+        deltaEl.innerHTML = "new";
+        deltaEl.className = "delta-badge new";
+        deltaEl.hidden = false;
+      }
+    } else {
+      deltaEl.hidden = true;
+    }
+  }
+
+  const prevReport = state.compare ? state.previousReport : null;
+  const currentDeviceName = item.title;
+  const detailsHtml = renderTrackDetails(item.instances || [], item.details || {}, prevReport, currentDeviceName);
   if (row._detailsHtml !== detailsHtml) {
     detailsEl.innerHTML = detailsHtml;
     row._detailsHtml = detailsHtml;
@@ -548,15 +912,68 @@ function updatePluginRow(row, item, maxSessionSamples) {
 
 // ── Data rows ──
 
+function _previousPluginMap() {
+  const map = new Map();
+  if (state.previousReport) {
+    (state.previousReport.plugins || []).forEach((p) => {
+      map.set(pluginKey(p), p);
+    });
+  }
+  return map;
+}
+
+function _previousInstanceMap(pluginNameKey) {
+  const map = new Map();
+  if (state.previousReport) {
+    (state.previousReport.plugins || []).forEach((p) => {
+      if (pluginKey(p) === pluginNameKey) {
+        (p.instances || []).forEach((inst) => {
+          const instKey = `${inst.device_name || ""}|${inst.track_index}`;
+          map.set(instKey, inst);
+        });
+      }
+    });
+  }
+  return map;
+}
+
+function _renderRemovedPlugins(currentReport) {
+  if (!state.compare || !state.previousReport || !currentReport) return "";
+  const currentKeys = new Set((currentReport.plugins || []).map((p) => pluginKey(p)));
+  const removed = (state.previousReport.plugins || []).filter((p) => !currentKeys.has(pluginKey(p)));
+  if (!removed.length) return "";
+
+  const rows = removed
+    .map((p) => {
+      const name = escapeHtml(displayPluginName(p.device_name));
+      const ms = fmtMs(p.max_latency_ms);
+      const instances = p.instance_count || p.instances?.length || 0;
+      return `<div class="removed-row">
+        <span class="removed-name" title="${name}">${name}</span>
+        <span class="removed-latency">${ms} ms</span>
+        <span>${instances} instance${instances !== 1 ? "s" : ""}</span>
+      </div>`;
+    })
+    .join("");
+
+  return `<div class="removed-section">
+    <details>
+      <summary>${removed.length} removed since last scan</summary>
+      <div class="removed-list">${rows}</div>
+    </details>
+  </div>`;
+}
+
 function pluginRows(report) {
   const source = state.showAll ? (report.plugins || []) : (report.top_plugins || []);
   return source.map((plugin) => ({
     key: `plugin:${pluginKey(plugin)}`,
-    title: plugin.device_name || "Unnamed Device",
+    title: displayPluginName(plugin.device_name),
     subtitle: (plugin.tracks || []).join(", "),
     latency_samples: Number(plugin.max_latency_samples || 0),
     latency_ms: Number(plugin.max_latency_ms || 0),
     instance_count: plugin.instance_count || (plugin.instances || []).length,
+    impact_score: Number(plugin.impact_score || 0),
     instances: plugin.instances || [],
     details: { nameLabel: "Track name", numberLabel: "Track #" },
   }));
@@ -590,7 +1007,7 @@ function channelRows(report) {
     if (!group.deviceNames.includes(deviceName)) group.deviceNames.push(deviceName);
     group.devices.push({
       ...device,
-      detail_name: deviceName,
+      detail_name: displayPluginName(deviceName),
       detail_number: device.format || device.class_name || "--",
     });
     groups.set(key, group);
@@ -600,11 +1017,13 @@ function channelRows(report) {
     key: group.key,
     title: group.track_number === "--" ? group.title : `${group.track_number}. ${group.title}`,
     subtitle: group.track_kind_label,
+    subtitle_kind: group.track_kind,
     latency_samples: group.latency_samples,
     latency_ms: group.latency_ms,
     instance_count: group.devices.length,
+    impact_score: Math.round(group.latency_ms * group.devices.length * 1000) / 1000,
     instances: group.devices,
-    details: { nameLabel: "Plug-in" },
+    details: { nameLabel: "Plug-in", showTrackKind: false },
   }));
 }
 
@@ -615,11 +1034,11 @@ function sortRows(rows) {
   return rows.slice().sort((a, b) => {
     switch (key) {
       case "latency-asc":
-        return a.latency_samples - b.latency_samples || a.latency_ms - b.latency_ms;
+        return a.latency_samples - b.latency_samples || a.latency_ms - b.latency_ms || compareRowsByStableLabel(a, b);
       case "instances-desc":
-        return (b.instance_count || 0) - (a.instance_count || 0) || b.latency_samples - a.latency_samples;
+        return (b.instance_count || 0) - (a.instance_count || 0) || b.latency_samples - a.latency_samples || compareRowsByStableLabel(a, b);
       default:
-        return b.latency_samples - a.latency_samples || b.latency_ms - a.latency_ms;
+        return b.latency_samples - a.latency_samples || b.latency_ms - a.latency_ms || compareRowsByStableLabel(a, b);
     }
   });
 }
@@ -654,10 +1073,11 @@ function totalRowCount(report) {
 }
 
 function updateRowCount(shown, total) {
+  const d = getDom();
   if (shown === total) {
-    dom.rowCount.textContent = `${total} items`;
+    d.rowCount.textContent = `${total} items`;
   } else {
-    dom.rowCount.textContent = `${shown} / ${total}`;
+    d.rowCount.textContent = `${shown} / ${total}`;
   }
 }
 
@@ -666,19 +1086,28 @@ function updateRowCount(shown, total) {
 function updateResults(report) {
   const total = totalRowCount(report);
   const rows = currentRows(report);
+  const rowKeys = rows.map((row) => row.key).join("\n");
 
   updateRowCount(rows.length, total);
 
+  if (dom.results.dataset.state === "loading") {
+    dom.results.className = "results";
+    dom.results.dataset.state = "";
+    dom.results.innerHTML = "";
+  }
+
   if (!total) {
+    teardownVirtualization();
     renderStateCard("success", {
       title: "No latency-inducing devices detected",
       description: "AbletonOSC responded, but the current set reported no plugin latency.",
-      actionsHtml: `<button class="recovery-btn secondary" onclick="scan({showLoading:true})">Rescan</button>`,
+      actionsHtml: components.actionButton("scan", "Rescan", "secondary"),
     });
     return;
   }
 
   if (!rows.length) {
+    teardownVirtualization();
     renderStateCard("empty", {
       title: `No matches for \u201C${escapeHtml(state.searchQuery)}\u201D`,
     });
@@ -686,36 +1115,97 @@ function updateResults(report) {
   }
 
   const maxSessionSamples = Math.max(...rows.map((item) => item.latency_samples), 1);
-  const rowsByKey = new Map(
-    [...dom.results.querySelectorAll(".plugin-row")].map((row) => [row.dataset.key, row])
-  );
-  const nextKeys = new Set();
 
-  dom.results.className = "results";
-  [...dom.results.children].forEach((child) => {
-    if (!child.classList.contains("plugin-row")) child.remove();
-  });
-
-  rows.forEach((item, index) => {
-    const key = item.key;
-    let row = rowsByKey.get(key);
-    nextKeys.add(key);
-
-    if (row) {
-      updatePluginRow(row, item, maxSessionSamples);
+  if (rows.length > 50) {
+    const preserveScroll = virtual.active && virtual.rowKeys === rowKeys;
+    virtual.rows = rows;
+    virtual.maxSamples = maxSessionSamples;
+    virtual.rowKeys = rowKeys;
+    if (!preserveScroll) {
+      virtual.heightCache.clear();
+      dom.results.scrollTop = 0;
+      virtual.scrollTop = 0;
+      virtual.viewportHeight = 0;
+    }
+    dom.results.className = "results virtualized";
+    if (!virtual.active) setupVirtualization();
+    if (preserveScroll) {
+      dom.results.querySelectorAll(".plugin-row.virtualized").forEach((row) => {
+        const index = virtual.rows.findIndex((item) => item.key === row.dataset.key);
+        if (index >= 0) {
+          updatePluginRow(row, virtual.rows[index], maxSessionSamples);
+          row._virtual_index = index;
+        }
+      });
+      if (virtual.spacer) virtual.spacer.style.height = totalHeight() + "px";
     } else {
-      row = createPluginRow(item, maxSessionSamples);
+      renderVisibleRows();
     }
+    renderVisibleRows();
+  } else {
+    teardownVirtualization();
+    dom.results.className = "results";
+    const rowsByKey = new Map(
+      [...dom.results.querySelectorAll(".plugin-row")].map((row) => [row.dataset.key, row])
+    );
+    const nextKeys = new Set();
+    const prevRects = new Map();
 
-    const currentAtIndex = dom.results.children[index];
-    if (currentAtIndex !== row) {
-      dom.results.insertBefore(row, currentAtIndex || null);
-    }
-  });
+    rowsByKey.forEach((row, key) => {
+      resetRowAnimation(row);
+      prevRects.set(key, getRect(row));
+    });
 
-  rowsByKey.forEach((row, key) => {
-    if (!nextKeys.has(key)) row.remove();
-  });
+    [...dom.results.children].forEach((child) => {
+      if (!child.classList.contains("plugin-row")) child.remove();
+    });
+
+    const fragment = document.createDocumentFragment();
+    const rowsToInsert = [];
+
+    rows.forEach((item, index) => {
+      const key = item.key;
+      let row = rowsByKey.get(key);
+      nextKeys.add(key);
+
+      if (row) {
+        updatePluginRow(row, item, maxSessionSamples);
+      } else {
+        row = createPluginRow(item, maxSessionSamples);
+        rowsToInsert.push({ row, key });
+      }
+
+      fragment.appendChild(row);
+    });
+
+    dom.results.appendChild(fragment);
+
+    rowsToInsert.forEach(({ row }) => {
+      applyFlipAnimation(row, null, getRect(row), "add");
+    });
+
+    rows.forEach((item, index) => {
+      const key = item.key;
+      const row = dom.results.children[index];
+      if (prevRects.has(key) && !rowsToInsert.find(r => r.key === key)) {
+        const prevRect = prevRects.get(key);
+        const nextRect = getRect(row);
+        applyFlipAnimation(row, prevRect, nextRect, "move");
+      }
+    });
+
+    rowsByKey.forEach((row, key) => {
+      if (!nextKeys.has(key)) {
+        resetRowAnimation(row);
+        row.remove();
+      }
+    });
+  }
+
+  const removedHtml = _renderRemovedPlugins(report);
+  if (removedHtml) {
+    dom.results.insertAdjacentHTML("beforeend", removedHtml);
+  }
 }
 
 function renderReport(report) {
@@ -723,7 +1213,7 @@ function renderReport(report) {
   updateDashboardStats(report);
   updateResults(report);
   state.hasReport = true;
-  dom.reportToolbar.hidden = false;
+  getDom().reportToolbar.hidden = false;
 }
 
 // ── Export ──
@@ -740,7 +1230,7 @@ function downloadFile(content, filename, mime) {
 
 function showExportToast(msg) {
   clearTimeout(state.exportToastTimer);
-  const el = dom.exportToast;
+  const el = getDom().exportToast;
   el.textContent = '';
   el.classList.remove('visible');
 
@@ -775,6 +1265,7 @@ function exportJson() {
       latency_ms: r.latency_ms,
       latency_samples: r.latency_samples,
       instances: r.instance_count || 0,
+      impact_score: r.impact_score || 0,
       tracks: r.subtitle,
     })),
   };
@@ -800,11 +1291,12 @@ function exportCsv() {
 function setGroupMode(mode) {
   if (state.groupMode === mode) return;
   state.groupMode = mode;
-  dom.byChannelToggle.classList.toggle("active", mode === "channel");
-  dom.byPluginToggle.classList.toggle("active", mode === "plugin");
-  dom.byChannelToggle.setAttribute("aria-pressed", String(mode === "channel"));
-  dom.byPluginToggle.setAttribute("aria-pressed", String(mode === "plugin"));
-  dom.searchInput.placeholder =
+  const d = getDom();
+  d.byChannelToggle.classList.toggle("active", mode === "channel");
+  d.byPluginToggle.classList.toggle("active", mode === "plugin");
+  d.byChannelToggle.setAttribute("aria-pressed", String(mode === "channel"));
+  d.byPluginToggle.setAttribute("aria-pressed", String(mode === "plugin"));
+  d.searchInput.placeholder =
     mode === "channel" ? "Filter by track or plug-in\u2026" : "Filter by plug-in name\u2026";
   if (state.latestReport) updateResults(state.latestReport);
 }
@@ -830,12 +1322,17 @@ async function scan({ showLoading = true } = {}) {
   const timeoutId = setTimeout(() => controller.abort(), SCAN_TIMEOUT_MS);
 
   try {
-    const res = await fetch("/api/scan", {
-      method: "POST",
-      headers: { "X-Requested-With": "latency-manager" },
+    const prevRes = await fetch("/api/last-scan");
+    const prevData = await prevRes.json();
+    state.previousReport = prevData.report || null;
+  } catch {
+    state.previousReport = null;
+  }
+
+  try {
+    const { res, data } = await api.localPost("/api/scan", {
       signal: controller.signal,
     });
-    const data = await res.json();
 
     if (!res.ok) {
       if (data.code === "scan_in_progress") {
@@ -910,72 +1407,106 @@ function rescheduleAutoRefresh() {
   if (state.autoRefresh) startAutoRefresh();
 }
 
-dom.autoRefreshToggle.addEventListener("change", () => {
-  state.autoRefresh = dom.autoRefreshToggle.checked;
-  if (state.autoRefresh) {
-    scan({ showLoading: false });
-    startAutoRefresh();
-  } else {
-    stopAutoRefresh();
-  }
-});
+function bindDeferredEvents() {
+  const d = getDom();
 
-// ── Interval pop-down slider ──
+  d.autoRefreshToggle.addEventListener("change", () => {
+    state.autoRefresh = d.autoRefreshToggle.checked;
+    if (state.autoRefresh) {
+      scan({ showLoading: false });
+      startAutoRefresh();
+    } else {
+      stopAutoRefresh();
+    }
+  });
+
+  d.intervalTrigger.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleIntervalDropdown();
+  });
+
+  d.intervalTrigger.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      toggleIntervalDropdown();
+    }
+    if (e.key === "Escape") {
+      closeIntervalDropdown();
+    }
+  });
+
+  d.intervalDropdown.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      closeIntervalDropdown();
+      d.intervalTrigger.focus();
+    }
+  });
+
+  d.intervalDropdown.addEventListener("click", (e) => {
+    const option = e.target.closest(".interval-option");
+    if (!option) return;
+    const val = parseInt(option.dataset.value, 10);
+    d.intervalDropdown.querySelectorAll(".interval-option").forEach((btn) => {
+      btn.classList.toggle("active", btn === option);
+    });
+    d.intervalTrigger.textContent = val + "s";
+    state.intervalSeconds = val;
+    state.currentBackoff = val;
+    closeIntervalDropdown();
+    d.intervalTrigger.focus();
+    if (state.autoRefresh) rescheduleAutoRefresh();
+  });
+
+  d.byChannelToggle.addEventListener("click", () => setGroupMode("channel"));
+  d.byPluginToggle.addEventListener("click", () => setGroupMode("plugin"));
+
+  let searchDebounce = null;
+  d.searchInput.addEventListener("input", () => {
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => {
+      state.searchQuery = d.searchInput.value;
+      if (state.latestReport) updateResults(state.latestReport);
+    }, 150);
+  });
+
+  d.sortSelect.addEventListener("change", () => {
+    state.sortKey = d.sortSelect.value;
+    if (state.latestReport) updateResults(state.latestReport);
+  });
+
+  d.showAllToggle.addEventListener("change", () => {
+    state.showAll = d.showAllToggle.checked;
+    if (state.latestReport) updateResults(state.latestReport);
+  });
+
+  d.compareToggle.addEventListener("change", () => {
+    state.compare = d.compareToggle.checked;
+    if (state.latestReport) updateResults(state.latestReport);
+  });
+
+  d.exportJson.addEventListener("click", exportJson);
+  d.exportCsv.addEventListener("click", exportCsv);
+}
 
 function openIntervalDropdown() {
-  dom.intervalDropdown.classList.add("open");
-  const active = dom.intervalDropdown.querySelector(".interval-option.active") || dom.intervalDropdown.querySelector(".interval-option");
+  const d = getDom();
+  d.intervalDropdown.classList.add("open");
+  const active = d.intervalDropdown.querySelector(".interval-option.active") || d.intervalDropdown.querySelector(".interval-option");
   if (active) active.focus();
 }
 
 function closeIntervalDropdown() {
-  dom.intervalDropdown.classList.remove("open");
+  getDom().intervalDropdown.classList.remove("open");
 }
 
 function toggleIntervalDropdown() {
-  if (dom.intervalDropdown.classList.contains("open")) {
+  const d = getDom();
+  if (d.intervalDropdown.classList.contains("open")) {
     closeIntervalDropdown();
   } else {
     openIntervalDropdown();
   }
 }
-
-dom.intervalTrigger.addEventListener("click", (e) => {
-  e.stopPropagation();
-  toggleIntervalDropdown();
-});
-
-dom.intervalTrigger.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" || e.key === " ") {
-    e.preventDefault();
-    toggleIntervalDropdown();
-  }
-  if (e.key === "Escape") {
-    closeIntervalDropdown();
-  }
-});
-
-dom.intervalDropdown.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") {
-    closeIntervalDropdown();
-    dom.intervalTrigger.focus();
-  }
-});
-
-dom.intervalDropdown.addEventListener("click", (e) => {
-  const option = e.target.closest(".interval-option");
-  if (!option) return;
-  const val = parseInt(option.dataset.value, 10);
-  dom.intervalDropdown.querySelectorAll(".interval-option").forEach((btn) => {
-    btn.classList.toggle("active", btn === option);
-  });
-  dom.intervalTrigger.textContent = val + "s";
-  state.intervalSeconds = val;
-  state.currentBackoff = val;
-  closeIntervalDropdown();
-  dom.intervalTrigger.focus();
-  if (state.autoRefresh) rescheduleAutoRefresh();
-});
 
 document.addEventListener("click", (e) => {
   const action = e.target.closest("[data-action]");
@@ -994,7 +1525,8 @@ document.addEventListener("click", (e) => {
     return;
   }
 
-  if (!dom.intervalDropdown.contains(e.target) && e.target !== dom.intervalTrigger) {
+  const d = getDom();
+  if (!d.intervalDropdown.contains(e.target) && e.target !== d.intervalTrigger) {
     closeIntervalDropdown();
   }
 });
@@ -1036,45 +1568,64 @@ dom.results.addEventListener("click", (event) => {
   const toggle = event.target.closest(".plugin-toggle");
   if (toggle) {
     const row = toggle.closest(".plugin-row");
-    if (row) toggleRow(row);
+    if (row) {
+      toggleRow(row);
+      if (virtual.active) {
+        requestAnimationFrame(() => refreshVirtualHeights());
+      }
+    }
     return;
   }
 
   const main = event.target.closest(".plugin-main");
   if (main) {
     const row = main.closest(".plugin-row");
-    if (row) toggleRow(row);
+    if (row) {
+      toggleRow(row);
+      if (virtual.active) {
+        requestAnimationFrame(() => refreshVirtualHeights());
+      }
+    }
   }
 });
 
-dom.byChannelToggle.addEventListener("click", () => setGroupMode("channel"));
-dom.byPluginToggle.addEventListener("click", () => setGroupMode("plugin"));
+dom.results.addEventListener("scroll", onResultsScroll, { passive: true });
+
+dom.results.addEventListener("keydown", (e) => {
+  if (!virtual.active) return;
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+
+  const focused = dom.results.querySelector(".plugin-row:focus-within, .plugin-row:focus");
+  if (!focused) return;
+
+  e.preventDefault();
+  const currentKey = focused.dataset.key;
+  let currentIndex = virtual.rows.findIndex((r) => r.key === currentKey);
+  if (currentIndex < 0) return;
+
+  const nextIndex = e.key === "ArrowDown"
+    ? Math.min(currentIndex + 1, virtual.rows.length - 1)
+    : Math.max(currentIndex - 1, 0);
+
+  if (nextIndex === currentIndex) return;
+
+  const nextRow = dom.results.querySelector(`.plugin-row[data-key="${CSS.escape(virtual.rows[nextIndex].key)}"]`);
+  if (!nextRow) {
+    dom.results.scrollTop = rowY(nextIndex);
+    requestAnimationFrame(() => {
+      const rendered = dom.results.querySelector(`.plugin-row[data-key="${CSS.escape(virtual.rows[nextIndex].key)}"]`);
+      if (rendered) {
+        const toggle = rendered.querySelector(".plugin-toggle");
+        if (toggle) toggle.focus();
+      }
+    });
+  } else {
+    const toggle = nextRow.querySelector(".plugin-toggle");
+    if (toggle) toggle.focus();
+  }
+});
 
 dom.scanButton.addEventListener("click", () => scan({ showLoading: true }));
-
-// ── Report toolbar controls ──
-
-let searchDebounce = null;
-dom.searchInput.addEventListener("input", () => {
-  clearTimeout(searchDebounce);
-  searchDebounce = setTimeout(() => {
-    state.searchQuery = dom.searchInput.value;
-    if (state.latestReport) updateResults(state.latestReport);
-  }, 150);
-});
-
-dom.sortSelect.addEventListener("change", () => {
-  state.sortKey = dom.sortSelect.value;
-  if (state.latestReport) updateResults(state.latestReport);
-});
-
-dom.showAllToggle.addEventListener("change", () => {
-  state.showAll = dom.showAllToggle.checked;
-  if (state.latestReport) updateResults(state.latestReport);
-});
-
-dom.exportJson.addEventListener("click", exportJson);
-dom.exportCsv.addEventListener("click", exportCsv);
 
 // ── Onboarding ──
 
@@ -1097,14 +1648,15 @@ const ONBOARDING_SESSION_DISMISSED_KEY = "latency-onboarding-dismissed-session";
 function showOnboarding() {
   onboarding.overlay.hidden = false;
   onboarding.overlay.setAttribute("aria-modal", "true");
+  const d = getDom();
   if ("inert" in HTMLElement.prototype) {
-    if (dom.shell) dom.shell.inert = true;
+    if (d.shell) d.shell.inert = true;
   } else {
-    if (dom.shell) {
-      dom.shell.setAttribute("aria-hidden", "true");
-      dom.shell._prevTabIndices = [];
-      getFocusableElements(dom.shell).forEach((el) => {
-        dom.shell._prevTabIndices.push({ el, tabIndex: el.tabIndex });
+    if (d.shell) {
+      d.shell.setAttribute("aria-hidden", "true");
+      d.shell._prevTabIndices = [];
+      getFocusableElements(d.shell).forEach((el) => {
+        d.shell._prevTabIndices.push({ el, tabIndex: el.tabIndex });
         el.tabIndex = -1;
       });
     }
@@ -1118,20 +1670,21 @@ function showOnboarding() {
 function hideOnboarding(returnFocusTo) {
   onboarding.overlay.hidden = true;
   onboarding.overlay.removeAttribute("aria-modal");
+  const d = getDom();
   if ("inert" in HTMLElement.prototype) {
-    if (dom.shell) dom.shell.inert = false;
+    if (d.shell) d.shell.inert = false;
   } else {
-    if (dom.shell) {
-      dom.shell.removeAttribute("aria-hidden");
-      if (dom.shell._prevTabIndices) {
-        dom.shell._prevTabIndices.forEach(({ el, tabIndex }) => {
+    if (d.shell) {
+      d.shell.removeAttribute("aria-hidden");
+      if (d.shell._prevTabIndices) {
+        d.shell._prevTabIndices.forEach(({ el, tabIndex }) => {
           el.tabIndex = tabIndex;
         });
-        delete dom.shell._prevTabIndices;
+        delete d.shell._prevTabIndices;
       }
     }
   }
-  const target = returnFocusTo || dom.scanButton || getFocusableElements(dom.shell)[0];
+  const target = returnFocusTo || dom.scanButton || getFocusableElements(d.shell)[0];
   target?.focus();
 }
 
@@ -1185,8 +1738,7 @@ async function runOnboarding() {
   onboarding.recheck.disabled = true;
   setOnboardingPending();
   try {
-    const res = await fetch("/api/onboarding");
-    const checks = await res.json();
+    const { data: checks } = await api.request("/api/onboarding");
     applyOnboardingResults(checks);
     if (checks.all_passed) {
       persistOnboardingDismissal();
@@ -1248,13 +1800,65 @@ onboarding.overlay.addEventListener("focusout", (e) => {
 
 // ── App Navigation ──
 
+function saveScrollPosition(view) {
+  state.viewScrollPositions.set(view, window.scrollY);
+}
+
+function restoreScrollPosition(view) {
+  const y = state.viewScrollPositions.get(view);
+  if (y !== undefined) {
+    window.scrollTo(0, y);
+  }
+}
+
 function setAppView(view) {
+  if (view === state.currentView || state.transitioning) return;
+
+  const prevView = state.currentView;
+  saveScrollPosition(prevView);
+
   document.querySelectorAll(".app-nav-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.view === view);
   });
-  document.querySelectorAll(".app-section").forEach((section) => {
-    section.hidden = section.dataset.view !== view;
-  });
+
+  const prevSection = document.querySelector(`.app-section[data-view="${prevView}"]`);
+  const nextSection = document.querySelector(`.app-section[data-view="${view}"]`);
+
+  if (!prevSection || !nextSection) {
+    state.currentView = view;
+    document.querySelectorAll(".app-section").forEach((section) => {
+      section.hidden = section.dataset.view !== view;
+    });
+    restoreScrollPosition(view);
+    return;
+  }
+
+  state.transitioning = true;
+
+  prevSection.removeAttribute("hidden");
+  prevSection.classList.add("transitioning-out");
+
+  nextSection.removeAttribute("hidden");
+  nextSection.classList.add("transitioning-in");
+
+  const duration = reducedMotion ? 0 : VIEW_TRANSITION_DURATION;
+
+  const cleanup = () => {
+    prevSection.classList.remove("transitioning-out");
+    prevSection.hidden = true;
+    nextSection.classList.remove("transitioning-in");
+    state.transitioning = false;
+    state.currentView = view;
+    restoreScrollPosition(view);
+  };
+
+  if (duration === 0) {
+    cleanup();
+    return;
+  }
+
+  prevSection.addEventListener("animationend", cleanup, { once: true });
+  setTimeout(cleanup, duration + 50);
 }
 
 document.querySelector(".app-nav").addEventListener("click", (e) => {
@@ -1266,6 +1870,7 @@ document.querySelector(".app-nav").addEventListener("click", (e) => {
 // ── Init ──
 
 async function init() {
+  bindDeferredEvents();
   refreshStatus();
   setInterval(refreshStatus, 5000);
   updateScanTimestamp();
@@ -1276,24 +1881,24 @@ async function init() {
     return;
   }
 
-  // Run checks silently; only show the onboarding modal if something is wrong.
   let checks = null;
   try {
-    const res = await fetch("/api/onboarding");
-    checks = await res.json();
+    const { data } = await api.request("/api/onboarding");
+    checks = data;
     applyOnboardingResults(checks);
-  } catch {
-    // Network error — fall through to show onboarding.
-  }
+  } catch {}
 
   if (checks?.all_passed) {
     persistOnboardingDismissal();
     scan({ showLoading: true });
   } else {
     showOnboarding();
-    // Checks already applied above if we got a response; re-run only on network error.
     if (!checks) runOnboarding();
   }
 }
 
-init();
+const scheduleInit = typeof requestIdleCallback === "function"
+  ? (cb) => requestIdleCallback(cb, { timeout: 1000 })
+  : (cb) => setTimeout(cb, 1);
+
+scheduleInit(() => init());

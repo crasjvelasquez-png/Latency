@@ -4,7 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LatencyManager</title>
-  <link rel="stylesheet" href="/styles.css">
+  <style>:root{--bg:#0a0b0d;--panel-bg:#111215;--card-bg:#16181c;--card-border:rgba(255,255,255,.06);--text:#f0f0f0;--muted:#9a9ea6;--dim:#6b6f76;--line:#22252a;--amber:#f0b732;--red:#e5484d;--green:#3ecf8e;--radius:10px;--radius-sm:6px}*{box-sizing:border-box;margin:0;padding:0}body{color:var(--text);background:var(--bg);font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;font-size:13px;line-height:1.5;min-height:100vh;-webkit-font-smoothing:antialiased}:focus-visible{outline:2px solid transparent;box-shadow:0 0 0 2px rgba(255,255,255,.45)}button:focus-visible,input:focus-visible,select:focus-visible{border-radius:var(--radius-sm)}.icon-app,.icon-scan{display:inline-block;background-color:currentColor;mask-repeat:no-repeat;-webkit-mask-repeat:no-repeat;mask-position:center;-webkit-mask-position:center;mask-size:contain;-webkit-mask-size:contain}.icon-app{width:24px;height:24px;mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='22 12 18 12 15 21 9 3 6 12 2 12'/%3E%3C/svg%3E");-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='22 12 18 12 15 21 9 3 6 12 2 12'/%3E%3C/svg%3E")}.icon-scan{width:14px;height:14px;mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='23 4 23 10 17 10'/%3E%3Cpolyline points='1 20 1 14 7 14'/%3E%3Cpath d='M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15'/%3E%3C/svg%3E");-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='23 4 23 10 17 10'/%3E%3Cpolyline points='1 20 1 14 7 14'/%3E%3Cpath d='M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15'/%3E%3C/svg%3E")}.app-shell{width:min(1120px,calc(100vw - 48px));margin:0 auto;padding:32px 0 60px}.app-header{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:32px}.logo-area{display:flex;align-items:center;gap:14px}.app-icon{width:36px;height:36px;background:var(--card-bg);border:1px solid var(--card-border);border-radius:var(--radius-sm);display:flex;align-items:center;justify-content:center;color:var(--text)}.logo-area h1{font-size:22px;font-weight:600;line-height:1;letter-spacing:-.02em}.session-info{font-size:13px;color:var(--muted);margin-top:4px}.scan-timestamp{font-size:12px;color:var(--dim);margin-top:2px}.header-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.connection-status,.refresh-controls,.scan-controls{display:flex;align-items:center;gap:10px}.app-nav{display:flex;gap:4px;margin-bottom:24px;padding:4px;background:var(--card-bg);border:1px solid var(--card-border);border-radius:var(--radius-sm);width:fit-content}.app-nav-btn{height:32px;padding:0 16px;border:none;border-radius:calc(var(--radius-sm) - 2px);background:transparent;color:var(--muted);font:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:color .15s,background .15s}.app-nav-btn:hover{color:var(--text);background:rgba(255,255,255,.04)}.app-nav-btn.active{background:var(--text);color:var(--bg)}.app-section[hidden]{display:none}.status-pill{height:32px;display:flex;align-items:center;gap:8px;border-radius:16px;padding:0 14px;color:var(--text);background:var(--card-bg);font-size:13px;border:1px solid var(--card-border)}.status-pill .dot{width:6px;height:6px;border-radius:50%;background:var(--dim)}.status-pill.online .dot{background:var(--green);box-shadow:0 0 6px rgba(62,207,142,.4)}.status-pill.offline .dot{background:var(--red);box-shadow:0 0 6px rgba(229,72,77,.4)}.status-pill.warning .dot{background:var(--amber);box-shadow:0 0 6px rgba(240,183,50,.35)}.status-pill.scanning .dot{background:var(--amber);box-shadow:0 0 6px rgba(240,183,50,.4);animation:pulse-dot 1.5s infinite}.status-pill.scanning-bg .dot{background:var(--amber);opacity:.6;box-shadow:0 0 4px rgba(240,183,50,.25)}@keyframes pulse-dot{0%{box-shadow:0 0 0 0 rgba(240,183,50,.4)}70%{box-shadow:0 0 0 6px rgba(240,183,50,0)}100%{box-shadow:0 0 0 0 rgba(240,183,50,0)}}.toggle-switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text);user-select:none}.toggle-switch input{display:none}.toggle-track{width:28px;height:16px;background:#333;border-radius:8px;position:relative;transition:background .2s}.toggle-track::before{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;background:#fff;border-radius:50%;transition:transform .2s}.toggle-switch input:checked+.toggle-track{background:var(--green)}.toggle-switch input:checked+.toggle-track::before{transform:translateX(12px)}.interval-popdown{position:relative}.interval-trigger{background:transparent;border:none;color:var(--muted);font:inherit;font-size:13px;cursor:pointer;padding:0;min-width:32px;text-align:left}.interval-trigger:hover{color:var(--text)}.interval-dropdown{position:absolute;top:calc(100% + 6px);right:0;background:var(--card-bg);border:1px solid var(--card-border);border-radius:var(--radius);padding:4px;display:none;flex-direction:row;gap:2px;z-index:10;box-shadow:0 8px 24px rgba(0,0,0,.4)}.interval-dropdown.open{display:flex}.interval-option{height:32px;padding:0 12px;border:none;border-radius:var(--radius-sm);background:transparent;color:var(--muted);font:inherit;font-size:13px;cursor:pointer;white-space:nowrap;transition:color .15s}.interval-option:hover{color:var(--text)}.interval-option.active{background:rgba(255,255,255,.08);color:var(--text)}.scan-button{height:36px;padding:0 18px;background:var(--text);color:var(--bg);border:none;font:inherit;font-size:13px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;border-radius:var(--radius-sm);transition:opacity .15s ease,transform .05s ease}.scan-button:hover{opacity:.9}.scan-button:active{transform:translateY(1px)}.scan-button:disabled{opacity:.5;cursor:not-allowed}.scan-button .icon-scan{margin-right:6px;vertical-align:middle}.scan-button.scanning .icon-scan{animation:spin 1s linear infinite}@keyframes spin{100%{transform:rotate(360deg)}}.dashboard-summary{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:24px}.info-card{background:var(--card-bg);border-radius:var(--radius);padding:20px;display:flex;flex-direction:column;gap:12px}.info-card-header h3{font-size:12px;color:var(--muted);font-weight:500}.info-card-value{display:flex;align-items:baseline;gap:8px}.info-card-value strong{font-size:32px;font-weight:400;line-height:1;color:var(--text)}.info-card-value .unit{color:var(--muted);font-size:14px}.info-card-meta{font-size:13px;color:var(--dim);margin-top:auto}.results{display:flex;flex-direction:column;gap:12px}.results.empty{min-height:220px;display:grid;place-items:center}.state-card{text-align:center;color:var(--muted);max-width:440px;padding:0 16px}.state-card__icon{margin-bottom:16px;display:flex;justify-content:center;align-items:center;height:44px}.state-card__icon::before{content:"";width:36px;height:36px}.state-card[data-state="empty"] .state-card__icon::before{opacity:.45;mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cline x1='20' y1='20' x2='16.2' y2='16.2'/%3E%3Cpath d='M8 11h6'/%3E%3C/svg%3E");-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cline x1='20' y1='20' x2='16.2' y2='16.2'/%3E%3Cpath d='M8 11h6'/%3E%3C/svg%3E")}.state-card[data-state="offline"] .state-card__icon::before{color:var(--amber);mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 2v6'/%3E%3Cpath d='M16 2v6'/%3E%3Cpath d='M7 8h10v4a5 5 0 0 1-10 0V8Z'/%3E%3Cpath d='M12 17v5'/%3E%3Cpath d='M5 22h14'/%3E%3Cline x1='4' y1='4' x2='20' y2='20'/%3E%3C/svg%3E");-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 2v6'/%3E%3Cpath d='M16 2v6'/%3E%3Cpath d='M7 8h10v4a5 5 0 0 1-10 0V8Z'/%3E%3Cpath d='M12 17v5'/%3E%3Cpath d='M5 22h14'/%3E%3Cline x1='4' y1='4' x2='20' y2='20'/%3E%3C/svg%3E")}.state-card[data-state="error"] .state-card__icon::before{color:var(--red);mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3 22 20H2L12 3Z'/%3E%3Cpath d='M12 9v5'/%3E%3Cpath d='M12 17h.01'/%3E%3C/svg%3E");-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3 22 20H2L12 3Z'/%3E%3Cpath d='M12 9v5'/%3E%3Cpath d='M12 17h.01'/%3E%3C/svg%3E")}.state-card[data-state="success"] .state-card__icon::before{color:var(--green);mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='m8 12 3 3 5-6'/%3E%3C/svg%3E");-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='m8 12 3 3 5-6'/%3E%3C/svg%3E")}.state-card__title{display:block;color:var(--text);margin-bottom:6px;font-size:15px;font-weight:500}.state-card__description{display:block;font-size:13px;line-height:1.55}.state-card__actions{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:20px}.recovery-btn{height:36px;padding:0 16px;border:none;border-radius:var(--radius-sm);background:var(--text);color:var(--bg);font:inherit;font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap;transition:opacity .15s ease}.recovery-btn:hover{opacity:.9}.recovery-btn.secondary{background:transparent;color:var(--text);border:1px solid var(--dim)}.recovery-btn.secondary:hover{border-color:var(--muted)}.modal{position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.75);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:grid;place-items:center;padding:20px;overflow-y:auto}.modal[hidden]{display:none}</style>
+  <link rel="stylesheet" href="/styles.css" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="/styles.css"></noscript>
 </head>
 <body>
   <div class="app-shell">
@@ -15,8 +17,10 @@
         </div>
         <div>
           <h1>Latency</h1>
-          <p id="sessionInfo" class="session-info">Detecting open project...</p>
-          <p id="scanTimestamp" class="scan-timestamp" aria-live="polite">Not scanned yet</p>
+          <p id="sessionInfo" class="session-info" hidden>Detecting open project...</p>
+          <p id="scanTimestamp" class="scan-timestamp" hidden aria-live="polite">Not scanned yet</p>
+          <span id="sessionSkeletons" class="skeleton skeleton-session"></span>
+          <span id="timestampSkeleton" class="skeleton skeleton-timestamp"></span>
         </div>
       </div>
       <div class="header-actions">
@@ -61,26 +65,27 @@
     <section class="app-section" data-view="scan">
     <main class="app-main">
       <section class="dashboard-summary" aria-label="Dashboard summary">
-      <div class="info-card">
+      <div class="info-card" id="summaryCardLatency">
         <div class="info-card-header">
           <h3>Total plugin latency</h3>
         </div>
         <div class="info-card-value">
-          <strong id="totalLatencyMs">--</strong><span class="unit">ms</span>
+          <strong id="totalLatencyMs" hidden>--</strong><span class="unit">ms</span>
         </div>
       </div>
 
-      <div class="info-card">
+      <div class="info-card" id="summaryCardBuffer">
         <div class="info-card-header">
           <h3>Buffer · sample rate</h3>
         </div>
         <div class="info-card-value">
-          <strong id="bufferSize">--</strong><span class="unit">/ <span id="sampleRate">--</span></span>
+          <strong id="bufferSize" hidden>--</strong><span class="unit">/ <span id="sampleRate" hidden>--</span></span>
         </div>
         <div class="info-card-meta">
-          <span id="trackCount">-- tracks</span> · <span id="totalDevices">-- devices</span>
+          <span id="trackCount" hidden>-- tracks</span> · <span id="totalDevices" hidden>-- devices</span>
         </div>
       </div>
+
     </section>
 
     <section id="recommendations" class="recommendations-panel" aria-label="Recommendations" hidden>
@@ -99,7 +104,15 @@
           <span>Diagnostics</span>
           <span id="diagnosticsSummary" class="diagnostics-summary">Checking connection...</span>
         </summary>
-        <div id="diagnosticsBody" class="diagnostics-body"></div>
+        <div id="diagnosticsBody" class="diagnostics-body">
+          <div id="diagnosticsSkeletons">
+            <div class="skeleton skeleton-block" style="width: 100%; height: 20px; margin-bottom: 8px;"></div>
+            <div class="skeleton skeleton-block" style="width: 85%; height: 20px; margin-bottom: 8px;"></div>
+            <div class="skeleton skeleton-block" style="width: 92%; height: 20px; margin-bottom: 8px;"></div>
+            <div class="skeleton skeleton-block" style="width: 78%; height: 20px; margin-bottom: 8px;"></div>
+            <div class="skeleton skeleton-block" style="width: 65%; height: 20px;"></div>
+          </div>
+        </div>
       </details>
     </section>
 
@@ -139,6 +152,11 @@
             <span class="check-box"></span>
             <span>Show all</span>
           </label>
+          <label class="show-all-label">
+            <input type="checkbox" id="compareToggle">
+            <span class="check-box"></span>
+            <span>Compare</span>
+          </label>
           <span id="rowCount" class="row-count"></span>
           <div class="export-group">
             <button id="exportJson" class="export-button" type="button">JSON</button>
@@ -147,16 +165,12 @@
           <span id="exportToast" class="export-toast" aria-live="polite" role="status"></span>
         </div>
       </div>
-      <div id="results" class="results empty">
-        <div class="state-card" data-state="empty">
-          <div class="state-card__icon"></div>
-          <h2 class="state-card__title">No scan yet</h2>
-          <p class="state-card__description">Open your session in Ableton Live, then scan to detect latency-inducing devices.</p>
-          <div class="state-card__actions">
-            <button class="recovery-btn" onclick="scan({showLoading:true})">Scan now</button>
-            <button class="recovery-btn secondary" onclick="openAbleton()">Open Live</button>
-          </div>
-        </div>
+      <div id="results" class="results loading" data-state="loading">
+        <div class="skeleton skeleton-row"></div>
+        <div class="skeleton skeleton-row"></div>
+        <div class="skeleton skeleton-row"></div>
+        <div class="skeleton skeleton-row"></div>
+        <div class="skeleton skeleton-row"></div>
       </div>
     </section>
     </main>
@@ -183,12 +197,64 @@
     </section>
 
     <section class="app-section" data-view="help" hidden>
-      <div class="placeholder-view">
-        <div class="placeholder-icon">
-          <span class="icon-help" aria-hidden="true"></span>
+      <div class="help-view">
+        <div class="help-header">
+          <div class="help-icon">
+            <span class="icon-help" aria-hidden="true"></span>
+          </div>
+          <h2>Help</h2>
+          <p>Frequently asked questions about LatencyManager.</p>
         </div>
-        <h2>Help</h2>
-        <p>Documentation and support will appear here.</p>
+        <div class="faq-list">
+          <details class="faq-item">
+            <summary>What does LatencyManager scan?</summary>
+            <div class="faq-answer">
+              <p>It scans the open Ableton Live set through AbletonOSC and reports plugin/device latency by track and plugin.</p>
+            </div>
+          </details>
+
+          <details class="faq-item">
+            <summary>Why does the app say AbletonOSC is offline?</summary>
+            <div class="faq-answer">
+              <p>Ableton Live needs to be running, AbletonOSC must be installed and enabled as a MIDI Remote Script, and it must be reachable on <code>127.0.0.1:11000</code>.</p>
+            </div>
+          </details>
+
+          <details class="faq-item">
+            <summary>Why do I need to reload AbletonOSC?</summary>
+            <div class="faq-answer">
+              <p>Reloading makes Ableton Live pick up the latency export handler used by the dashboard. Run <code>python3 app.py --reload-abletonosc</code> once after installing or updating this tool.</p>
+            </div>
+          </details>
+
+          <details class="faq-item">
+            <summary>Why are some devices shown as inactive or unknown?</summary>
+            <div class="faq-answer">
+              <p>AbletonOSC may not expose every state for every device type. The dashboard shows <code>Unknown</code> when the scan cannot confidently read the active state.</p>
+            </div>
+          </details>
+
+          <details class="faq-item">
+            <summary>How should I use the latency numbers?</summary>
+            <div class="faq-answer">
+              <p>Start with the highest-latency plugins, especially anything above 20 ms. Consider bypassing, freezing, replacing, or moving those devices to reduce overall session latency.</p>
+            </div>
+          </details>
+
+          <details class="faq-item">
+            <summary>Where are scan results stored?</summary>
+            <div class="faq-answer">
+              <p>The latest scan is cached locally at <code>~/Library/Application Support/LatencyManager/abletonosc-latency-report.json</code>.</p>
+            </div>
+          </details>
+
+          <details class="faq-item">
+            <summary>Why does the current project name sometimes fail to appear?</summary>
+            <div class="faq-answer">
+              <p>Project detection is macOS-specific and depends on Automation permissions plus Live exposing the open set path. Grant Automation permission if prompted, or check System Settings &rarr; Privacy &amp; Security &rarr; Automation.</p>
+            </div>
+          </details>
+        </div>
       </div>
     </section>
   </div>
@@ -277,6 +343,8 @@
     </div>
   </section>
 
-  <script src="/app.js"></script>
+  <script src="/api.js" defer></script>
+  <script src="/components.js" defer></script>
+  <script src="/app.js" defer></script>
 </body>
 </html>
