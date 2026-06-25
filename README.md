@@ -1,4 +1,4 @@
-# LatencyManager
+# Latency
 
 Local Ableton Live plugin latency dashboard.
 
@@ -26,6 +26,36 @@ Requires [AbletonOSC](https://github.com/ideoforms/AbletonOSC) installed in Able
    ```
 
 4. Open `http://127.0.0.1:8799`.
+
+## Native macOS App
+
+Build the standalone app:
+
+```bash
+scripts/build_macos_app.sh
+```
+
+The build output is `dist/Latency.app`. Double-click it in Finder or run:
+
+```bash
+open dist/Latency.app
+```
+
+The app opens the same dashboard in a native macOS window and does not require Terminal for normal use. Closing the window quits the local backend.
+
+The macOS app is configured as:
+
+- App name: `Latency`
+- Bundle identifier: `com.c4milo.Latency`
+- Minimum macOS target: macOS 15
+- Build target: universal2, when the active Python and PyInstaller toolchain support it
+- Signing: local ad-hoc signing
+
+If the build fails because `PyInstaller`, `pywebview`, or `Pillow` is missing, run:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
 
 ## Features
 

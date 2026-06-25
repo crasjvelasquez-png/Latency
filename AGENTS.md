@@ -7,7 +7,9 @@
 
 ## Commands
 - Setup: `python3 -m pip install -r requirements.txt`.
-- Run dashboard: `python3 app.py`, then open `http://127.0.0.1:8799`; if occupied, the app falls forward through ports `8800-8899`.
+- Run dashboard: `python3 app.py` — it will automatically open your default browser to the correct port. If the default port (`8799`) is occupied, it falls forward through `8800-8899`.
+- Even easier on macOS: double-click `LatencyManager.command` in Finder (it simply runs `python3 app.py` from the repo folder).
+- Prevent auto-open: `python3 app.py --no-open`.
 - Reload AbletonOSC handlers after installing/updating this tool: `python3 app.py --reload-abletonosc`.
 - Focused syntax check: `python3 -m py_compile app.py`.
 

@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections import defaultdict
@@ -20,7 +21,14 @@ from urllib.parse import urlparse
 from pythonosc import dispatcher, osc_server, udp_client
 
 
-ROOT = Path(__file__).resolve().parent
+def _resource_root():
+    bundled_root = getattr(sys, "_MEIPASS", None)
+    if bundled_root:
+        return Path(bundled_root)
+    return Path(__file__).resolve().parent
+
+
+ROOT = _resource_root()
 STATIC_DIR = ROOT / "static"
 REPORT_PATH = Path("/tmp/abletonosc-latency-report.json")
 APP_SUPPORT_DIR = Path.home() / "Library" / "Application Support" / "LatencyManager"
@@ -846,25 +854,65 @@ def create_web_server(requested_port):
     )
 
 
-def _acquire_instance_lock():
-    lock = open(LOCK_FILE, "w")
+def _read_instance_info():
+    try:
+        with LOCK_FILE.open() as fh:
+            data = json.load(fh)
+            if isinstance(data, dict):
+                return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return {}
+
+
+def _acquire_instance_lock(port=None, url=None):
+    APP_SUPPORT_DIR.mkdir(parents=True, exist_ok=True)
+    lock = open(LOCK_FILE, "a+")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
+        info = _read_instance_info()
         lock.close()
-        raise SystemExit(
-            "LatencyManager is already running. "
-            "Quit the existing instance before starting a new one."
-        )
-    lock.write(str(os.getpid()))
+        message = "Latency is already running."
+        existing_url = info.get("url")
+        if existing_url:
+            message = f"{message} Existing dashboard: {existing_url}"
+        raise SystemExit(message)
+    lock.seek(0)
+    lock.truncate()
+    lock.write(json.dumps({
+        "pid": os.getpid(),
+        "port": port,
+        "url": url,
+        "app": "Latency",
+    }))
     lock.flush()
     return lock
+
+
+def start_dashboard_server(requested_port=WEB_PORT, acquire_lock=True):
+    server, port = create_web_server(requested_port)
+    url = f"http://127.0.0.1:{port}"
+    instance_lock = _acquire_instance_lock(port=port, url=url) if acquire_lock else None
+    return server, port, url, instance_lock
+
+
+def serve_dashboard(requested_port=WEB_PORT, open_browser=True):
+    server, _port, url, _instance_lock = start_dashboard_server(requested_port)
+    print(f"Latency running at {url}")
+    if open_browser:
+        subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
 
 
 def main():
     parser = argparse.ArgumentParser(description="Ableton Live latency dashboard")
     parser.add_argument("--reload-abletonosc", action="store_true", help="Ask AbletonOSC to reload its Python handlers")
     parser.add_argument("--port", type=int, default=WEB_PORT)
+    parser.add_argument("--no-open", action="store_true", help="Do not open the browser automatically")
     args = parser.parse_args()
 
     if args.reload_abletonosc:
@@ -872,13 +920,7 @@ def main():
         print("AbletonOSC reload requested.")
         return
 
-    APP_SUPPORT_DIR.mkdir(parents=True, exist_ok=True)
-    _instance_lock = _acquire_instance_lock()  # noqa: F841 — held for process lifetime
-
-    os.chdir(STATIC_DIR)
-    server, port = create_web_server(args.port)
-    print(f"LatencyManager running at http://127.0.0.1:{port}")
-    server.serve_forever()
+    serve_dashboard(requested_port=args.port, open_browser=not args.no_open)
 
 
 if __name__ == "__main__":
