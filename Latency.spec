@@ -14,7 +14,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # Pillow is only used by the icon-generation script, not by the app.
+    # Excluding it also keeps unused optional image plugins out of the bundle.
+    excludes=["PIL"],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -35,7 +37,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch="universal2",
+    target_arch="arm64",
 )
 
 coll = COLLECT(

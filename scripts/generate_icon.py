@@ -7,9 +7,12 @@ from PIL import Image, ImageDraw
 ROOT = Path(__file__).resolve().parents[1]
 ICONSET = ROOT / "assets" / "Latency.iconset"
 ICNS = ROOT / "assets" / "Latency.icns"
+MASTER = ROOT / "assets" / "Latency-1024.png"
+MASTER_SIZE = 1024
+ARTWORK_SCALE = 0.82
 
 
-def draw_icon(size):
+def draw_artwork(size):
     image = Image.new("RGBA", (size, size), (255, 255, 255, 0))
     draw = ImageDraw.Draw(image)
 
@@ -50,8 +53,19 @@ def draw_icon(size):
     return image
 
 
+def draw_master():
+    image = Image.new("RGBA", (MASTER_SIZE, MASTER_SIZE), (255, 255, 255, 0))
+    artwork_size = round(MASTER_SIZE * ARTWORK_SCALE)
+    artwork = draw_artwork(artwork_size)
+    offset = (MASTER_SIZE - artwork_size) // 2
+    image.alpha_composite(artwork, (offset, offset))
+    return image
+
+
 def main():
     ICONSET.mkdir(parents=True, exist_ok=True)
+    master = draw_master()
+    master.save(MASTER)
     sizes = {
         "icon_16x16.png": 16,
         "icon_16x16@2x.png": 32,
@@ -65,8 +79,10 @@ def main():
         "icon_512x512@2x.png": 1024,
     }
     for filename, size in sizes.items():
-        draw_icon(size).save(ICONSET / filename)
+        icon = master.resize((size, size), Image.Resampling.LANCZOS)
+        icon.save(ICONSET / filename)
 
+    print(f"Wrote {MASTER}")
     print(f"Wrote {ICONSET}")
     print(f"Run: iconutil -c icns {ICONSET} -o {ICNS}")
 
