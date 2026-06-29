@@ -5,7 +5,7 @@
   --card-border: rgba(255, 255, 255, 0.06);
   --text: #f0f0f0;
   --muted: #9a9ea6;
-  --dim: #6b6f76;
+  --dim: #8b8f96;
   --line: #22252a;
   --amber: #f0b732;
   --red: #e5484d;
@@ -126,6 +126,20 @@ select:focus-visible {
   white-space: nowrap;
   border-width: 0;
 }
+
+.skip-link {
+  position: fixed;
+  left: 16px;
+  top: 16px;
+  z-index: 1000;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--text);
+  color: var(--bg);
+  transform: translateY(-200%);
+}
+
+.skip-link:focus { transform: translateY(0); }
 
 /* ── Layout ── */
 .app-shell {
@@ -1164,6 +1178,11 @@ select:focus-visible {
   border-color: rgba(255, 255, 255, 0.1);
 }
 
+.plugin-row.bottleneck {
+  border-color: rgba(240, 183, 50, 0.65);
+  box-shadow: inset 3px 0 0 var(--amber);
+}
+
 .plugin-main {
   display: grid;
   grid-template-columns: minmax(160px, 1.2fr) minmax(80px, 2fr) 72px 36px;
@@ -1173,6 +1192,12 @@ select:focus-visible {
   padding: 14px 20px;
   position: relative;
   cursor: pointer;
+}
+
+.plugin-main:focus-visible,
+.faq-item summary:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: -2px;
 }
 
 .plugin-info {

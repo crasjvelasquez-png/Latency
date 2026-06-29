@@ -19,6 +19,10 @@ function getDom() {
   _domDeferred = {
     ...dom,
     totalLatencyMs: $("totalLatencyMs"),
+    cumulativeLatencyMs: $("cumulativeLatencyMs"),
+    bottleneckTrack: $("bottleneckTrack"),
+    latencySkeleton: $("latencySkeleton"),
+    bufferSkeleton: $("bufferSkeleton"),
     bufferSize: $("bufferSize"),
     sampleRate: $("sampleRate"),
     trackCount: $("trackCount"),
@@ -44,6 +48,7 @@ function getDom() {
     timestampSkeleton: $("timestampSkeleton"),
     sessionSkeletons: $("sessionSkeletons"),
     diagnosticsSkeletons: $("diagnosticsSkeletons"),
+    recommendations: $("recommendations"),
   };
   return _domDeferred;
 }
@@ -93,22 +98,23 @@ const virtual = {
   viewportHeight: 0,
   active: false,
   focusedKey: null,
+  prefixY: new Float64Array(1),
 };
 
-function rowY(index) {
-  let y = 0;
-  for (let i = 0; i < index; i++) {
-    y += (virtual.heightCache.get(i) || VIRTUAL_ROW_HEIGHT) + VIRTUAL_ROW_GAP;
+function rebuildPrefixSums() {
+  virtual.prefixY = new Float64Array(virtual.rows.length + 1);
+  for (let i = 0; i < virtual.rows.length; i++) {
+    virtual.prefixY[i + 1] = virtual.prefixY[i]
+      + (virtual.heightCache.get(i) || VIRTUAL_ROW_HEIGHT) + VIRTUAL_ROW_GAP;
   }
-  return y;
+}
+
+function rowY(index) {
+  return virtual.prefixY[index] || 0;
 }
 
 function totalHeight() {
-  let h = 0;
-  for (let i = 0; i < virtual.rows.length; i++) {
-    h += (virtual.heightCache.get(i) || VIRTUAL_ROW_HEIGHT) + VIRTUAL_ROW_GAP;
-  }
-  return Math.max(0, h - VIRTUAL_ROW_GAP);
+  return virtual.rows.length ? Math.max(0, virtual.prefixY[virtual.rows.length] - VIRTUAL_ROW_GAP) : 0;
 }
 
 function setupVirtualization() {
@@ -126,6 +132,7 @@ function teardownVirtualization() {
   }
   virtual.active = false;
   virtual.heightCache.clear();
+  rebuildPrefixSums();
 }
 
 function renderVisibleRows() {
@@ -217,6 +224,7 @@ function refreshVirtualHeights() {
     const idx = row._virtual_index;
     if (idx != null) virtual.heightCache.set(idx, measureRowHeight(row));
   });
+  rebuildPrefixSums();
   if (virtual.spacer) virtual.spacer.style.height = totalHeight() + "px";
 }
 
@@ -309,14 +317,7 @@ function fmtMs(value) {
   return n.toFixed(2);
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
+const escapeHtml = components.escapeHtml;
 
 function getFocusableElements(container) {
   if (!container) return [];
@@ -327,6 +328,7 @@ function getFocusableElements(container) {
   ).filter((el) => !el.disabled && el.offsetParent !== null);
 }
 
+// SYNC: Keep aliases and pluginKey() aligned with app.py normalize_plugin_name().
 var PLUGIN_NAME_ALIASES = {
   "fabfilter pro-q 3": "pro-q 3",
   "fabfilter pro-q 4": "pro-q 4",
@@ -727,17 +729,18 @@ function renderOffline() {
   });
 }
 
-function renderError(message) {
+function renderError(message, title = "Scan failed") {
   renderStateCard("error", {
-    title: "Scan failed",
+    title,
     errorMessage: message,
     actionsHtml: `${components.actionButton("scan", "Retry scan")}
       ${components.actionButton("reload-osc", "Reload AbletonOSC", "secondary")}`,
   });
 }
 
-function getLatencyClass(samples, ms) {
-  const latencyMs = ms || (samples / 48);
+function getLatencyClass(samples, ms, sampleRate) {
+  const rate = Number(sampleRate || state.latestReport?.sample_rate || 48000);
+  const latencyMs = hasNumericValue(ms) ? Number(ms) : (Number(samples || 0) / rate * 1000);
   if (latencyMs < 20) return "low";
   if (latencyMs > 100) return "high";
   return "medium";
@@ -810,14 +813,21 @@ function renderTrackDetails(instances, { nameLabel = "Track name", numberLabel =
 
 function updateDashboardStats(report) {
   const d = getDom();
-  const hasLatency = setTotalLatencySeverity(report.total_latency_ms);
+  const hasLatency = setTotalLatencySeverity(report.pdc_latency_ms);
   if (hasLatency) {
-    tweenText(d.totalLatencyMs, Number(report.total_latency_ms), fmtMs);
+    tweenText(d.totalLatencyMs, Number(report.pdc_latency_ms), fmtMs);
   } else {
     stopTween(d.totalLatencyMs);
     d.totalLatencyMs.textContent = "--";
     delete d.totalLatencyMs.dataset.value;
   }
+  d.cumulativeLatencyMs.textContent = hasNumericValue(report.cumulative_latency_ms)
+    ? `${fmtMs(report.cumulative_latency_ms)} ms cumulative`
+    : "Cumulative latency unavailable";
+  const bottleneck = report.bottleneck_track;
+  d.bottleneckTrack.textContent = bottleneck
+    ? `${bottleneck.track_name} · ${bottleneck.device_count} device${bottleneck.device_count === 1 ? "" : "s"}`
+    : "No PDC bottleneck";
   if (hasNumericValue(report.buffer_size)) {
     tweenText(d.bufferSize, Number(report.buffer_size), (n) => String(Math.round(n)));
   } else {
@@ -833,8 +843,23 @@ function updateDashboardStats(report) {
 
   const anyValueVisible = hasLatency || hasNumericValue(report.buffer_size) || hasNumericValue(report.sample_rate);
   if (anyValueVisible) {
-    revealContent([d.totalLatencyMs, d.bufferSize, d.sampleRate, d.trackCount, d.totalDevices], []);
+    revealContent(
+      [d.totalLatencyMs, d.bufferSize, d.sampleRate, d.trackCount, d.totalDevices],
+      [d.latencySkeleton, d.bufferSkeleton]
+    );
   }
+}
+
+function renderRecommendations(report) {
+  const panel = getDom().recommendations;
+  const list = panel.querySelector(".recommendations-list");
+  const recommendations = report.recommendations || [];
+  panel.hidden = recommendations.length === 0;
+  list.innerHTML = recommendations.map((item) => `
+    <article class="recommendation-card">
+      <h3>${escapeHtml(item.title)}</h3>
+      <p>${escapeHtml(item.message)}</p>
+    </article>`).join("");
 }
 
 function createPluginRow(item, maxSessionSamples) {
@@ -859,6 +884,7 @@ function updatePluginRow(row, item, maxSessionSamples) {
   const name = item.title || "Unnamed";
   const subtitle = item.subtitle || "";
   const subtitleKind = item.subtitle_kind || "";
+  row.classList.toggle("bottleneck", Boolean(item.is_bottleneck));
 
   if (nameEl.textContent !== name) nameEl.textContent = name;
   nameEl.title = name;
@@ -991,6 +1017,7 @@ function channelRows(report) {
       key,
       title: name,
       track_number: number,
+      track_index: device.track_index,
       track_kind: track.track_kind || device.track_kind || "unknown",
       track_kind_label: track.track_kind_label || device.track_kind_label || trackKindLabel(track.track_kind || device.track_kind || "unknown"),
       devices: [],
@@ -1013,6 +1040,7 @@ function channelRows(report) {
     groups.set(key, group);
   });
 
+  const bottleneck = report.bottleneck_track;
   return [...groups.values()].map((group) => ({
     key: group.key,
     title: group.track_number === "--" ? group.title : `${group.track_number}. ${group.title}`,
@@ -1024,6 +1052,7 @@ function channelRows(report) {
     impact_score: Math.round(group.latency_ms * group.devices.length * 1000) / 1000,
     instances: group.devices,
     details: { nameLabel: "Plug-in", showTrackKind: false },
+    is_bottleneck: Boolean(bottleneck && String(bottleneck.track_index) === String(group.track_index)),
   }));
 }
 
@@ -1127,6 +1156,7 @@ function updateResults(report) {
       virtual.scrollTop = 0;
       virtual.viewportHeight = 0;
     }
+    rebuildPrefixSums();
     dom.results.className = "results virtualized";
     if (!virtual.active) setupVirtualization();
     if (preserveScroll) {
@@ -1211,6 +1241,7 @@ function updateResults(report) {
 function renderReport(report) {
   state.latestReport = report;
   updateDashboardStats(report);
+  renderRecommendations(report);
   updateResults(report);
   state.hasReport = true;
   getDom().reportToolbar.hidden = false;
@@ -1322,9 +1353,13 @@ async function scan({ showLoading = true } = {}) {
   const timeoutId = setTimeout(() => controller.abort(), SCAN_TIMEOUT_MS);
 
   try {
-    const prevRes = await fetch("/api/last-scan");
+    const previousController = new AbortController();
+    const previousTimeout = setTimeout(() => previousController.abort(), 2000);
+    controller.signal.addEventListener("abort", () => previousController.abort(), { once: true });
+    const prevRes = await fetch("/api/last-scan", { signal: previousController.signal });
     const prevData = await prevRes.json();
     state.previousReport = prevData.report || null;
+    clearTimeout(previousTimeout);
   } catch {
     state.previousReport = null;
   }
@@ -1818,7 +1853,9 @@ function setAppView(view) {
   saveScrollPosition(prevView);
 
   document.querySelectorAll(".app-nav-btn").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.view === view);
+    const selected = btn.dataset.view === view;
+    btn.classList.toggle("active", selected);
+    btn.setAttribute("aria-selected", String(selected));
   });
 
   const prevSection = document.querySelector(`.app-section[data-view="${prevView}"]`);
@@ -1867,10 +1904,31 @@ document.querySelector(".app-nav").addEventListener("click", (e) => {
   setAppView(btn.dataset.view);
 });
 
+document.querySelector(".app-nav").addEventListener("keydown", (event) => {
+  const tabs = [...document.querySelectorAll(".app-nav-btn")];
+  const current = tabs.indexOf(event.target);
+  if (current < 0) return;
+  let next = current;
+  if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+  else if (event.key === "ArrowLeft") next = (current - 1 + tabs.length) % tabs.length;
+  else if (event.key === "Home") next = 0;
+  else if (event.key === "End") next = tabs.length - 1;
+  else return;
+  event.preventDefault();
+  tabs[next].focus();
+  setAppView(tabs[next].dataset.view);
+});
+
 // ── Init ──
 
 async function init() {
   bindDeferredEvents();
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => {
+      virtual.viewportHeight = -1;
+      scheduleRenderVisible();
+    }).observe(dom.results);
+  }
   refreshStatus();
   setInterval(refreshStatus, 5000);
   updateScanTimestamp();

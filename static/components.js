@@ -102,6 +102,7 @@
 
   window.LatencyComponents = {
     actionButton,
+    escapeHtml,
     loadingRows,
     pluginRowShell,
     stateCard,

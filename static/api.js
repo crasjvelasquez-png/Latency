@@ -128,6 +128,12 @@
 
           resolve({ res, data, fromCache: false });
         } catch (err) {
+          if (err instanceof TypeError) {
+            const networkError = new Error("Cannot reach LatencyManager. Check that the local app is running.");
+            networkError.cause = err;
+            reject(networkError);
+            return;
+          }
           reject(err);
         } finally {
           if (pending.get(key)?.controller === controller) {

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import argparse
+import copy
 import ctypes
 import ctypes.util
 import errno
 import fcntl
 import json
+import logging
 import os
 import re
 import shutil
@@ -42,7 +44,20 @@ WEB_PORT_MAX = 8899
 API_SCHEMA_VERSION = 1
 API_APP_ID = "latency-manager"
 
+OSC_HEALTH_TIMEOUT = 0.6
+OSC_HANDLER_TIMEOUT = 2.0
+OSC_EXPORT_TIMEOUT = 5.0
+OSC_RELOAD_TIMEOUT = 1.5
+REPORT_POLL_TIMEOUT = 3.0
+REPORT_POLL_INTERVAL = 0.05
+SUBPROCESS_TIMEOUT = 1.0
+
+logger = logging.getLogger("latency-manager")
+
 _scan_lock = threading.Lock()
+_osc_lock = threading.Lock()
+_report_cache = {"path": None, "mtime_ns": None, "report": None}
+_last_status_payload = None
 
 
 class ResponsePortConflict(OSError):
@@ -60,6 +75,10 @@ class OSCRequest:
         self.event.set()
 
     def send(self, address, *args):
+        with _osc_lock:
+            return self._send_locked(address, *args)
+
+    def _send_locked(self, address, *args):
         disp = dispatcher.Dispatcher()
         disp.map(address, self._handler)
         disp.map("/live/error", self._handler)
@@ -114,18 +133,10 @@ RECOVERY_ACTIONS = {
 }
 
 
-def abletonosc_online():
-    try:
-        OSCRequest(timeout=0.6).send("/live/test")
-        return True
-    except Exception:
-        return False
-
-
 def _abletonosc_check():
     """Returns (is_online, error_code_or_None) — distinguishes port conflicts from offline."""
     try:
-        OSCRequest(timeout=0.6).send("/live/test")
+        OSCRequest(timeout=OSC_HEALTH_TIMEOUT).send("/live/test")
         return True, None
     except ResponsePortConflict:
         return False, "port_conflict"
@@ -137,18 +148,10 @@ def ableton_running():
     try:
         result = subprocess.run(
             ["pgrep", "-x", "Live"],
-            capture_output=True, text=True, timeout=1.0,
+            capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
         )
         return result.returncode == 0
     except Exception:
-        return False
-
-
-def latency_handler_available():
-    try:
-        OSCRequest(timeout=2.0).send("/live/song/export/latency")
-        return True
-    except RuntimeError:
         return False
 
 
@@ -156,7 +159,7 @@ def _latency_handler_check(osc_online):
     if not osc_online:
         return False, None
     try:
-        OSCRequest(timeout=2.0).send("/live/song/export/latency")
+        OSCRequest(timeout=OSC_HANDLER_TIMEOUT).send("/live/song/export/latency")
         return True, None
     except ResponsePortConflict:
         return False, "response_port_conflict"
@@ -166,10 +169,6 @@ def _latency_handler_check(osc_online):
         return False, "Timed out waiting for the latency export handler."
     except Exception as exc:
         return False, str(exc) or "Latency export handler is unavailable."
-    except (TimeoutError, Exception):
-        return False
-
-
 def automation_permission_granted():
     script = (
         'tell application "System Events" to tell process "Live" '
@@ -249,6 +248,7 @@ def _diagnostics_payload(status):
 
 
 def build_status_payload(include_cached_report=False):
+    global _last_status_payload
     live_running = ableton_running()
     osc_online, osc_error = _abletonosc_check() if live_running else (False, None)
     handler_available, handler_error = _latency_handler_check(osc_online)
@@ -280,6 +280,7 @@ def build_status_payload(include_cached_report=False):
         cached = load_cached_report()
         if cached:
             payload["cached_report"] = cached
+    _last_status_payload = payload
     return payload
 
 
@@ -367,14 +368,14 @@ def _get_coreaudio_buffer_size():
 
 def export_latency_report():
     before_time = time.time()
-    response = OSCRequest(timeout=5.0).send("/live/song/export/latency")
+    response = OSCRequest(timeout=OSC_EXPORT_TIMEOUT).send("/live/song/export/latency")
     output_path = Path(response["args"][0]) if response and response["args"] else REPORT_PATH
 
-    deadline = time.time() + 3.0
+    deadline = time.time() + REPORT_POLL_TIMEOUT
     while time.time() < deadline:
         if output_path.exists() and output_path.stat().st_mtime > before_time:
             break
-        time.sleep(0.05)
+        time.sleep(REPORT_POLL_INTERVAL)
 
     if not output_path.exists():
         raise FileNotFoundError("AbletonOSC did not create the latency report.")
@@ -396,16 +397,24 @@ def export_latency_report():
 
 
 def load_cached_report():
+    global _report_cache
     try:
+        mtime_ns = CACHED_REPORT_PATH.stat().st_mtime_ns
+        cache_path = str(CACHED_REPORT_PATH)
+        if _report_cache["path"] == cache_path and _report_cache["mtime_ns"] == mtime_ns:
+            return _report_cache["report"]
         with CACHED_REPORT_PATH.open() as fh:
             report = json.load(fh)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
-    return summarize_report(report)
+    processed = summarize_report(report)
+    _report_cache = {"path": cache_path, "mtime_ns": mtime_ns, "report": processed}
+    return processed
 
 
-def scan_error_payload(message, code, status_code=502):
-    status = build_status_payload(include_cached_report=True)
+def scan_error_payload(message, code, status_code=502, status=None):
+    status = copy.deepcopy(status or _last_status_payload or {})
+    cached = load_cached_report()
     payload = {
         "error": message,
         "code": code,
@@ -418,8 +427,8 @@ def scan_error_payload(message, code, status_code=502):
         payload["diagnostics"]["state"] = "scan_failed"
         payload["diagnostics"]["underlying_state"] = status.get("connection_state")
         payload["diagnostics"]["recovery_actions"] = RECOVERY_ACTIONS["scan_failed"]
-    if status.get("cached_report"):
-        payload["cached_report"] = status["cached_report"]
+    if cached:
+        payload["cached_report"] = cached
     return status_code, payload
 
 
@@ -636,9 +645,78 @@ def summarize_report(report):
     report["plugins"] = ranked
     report["top_plugins"] = ranked[:10]
     report["latency_device_count"] = len([d for d in devices if int(d.get("latency_samples") or 0) > 0])
-    report["total_latency_samples"] = sum(int(d.get("latency_samples") or 0) for d in devices)
-    report["total_latency_ms"] = round(sum(float(d.get("latency_ms") or 0) for d in devices), 3)
+    cumulative_samples = sum(int(d.get("latency_samples") or 0) for d in devices)
+    cumulative_ms = round(sum(float(d.get("latency_ms") or 0) for d in devices), 3)
+    # Backward-compatible names: these are cumulative across every track, not PDC overhead.
+    report["total_latency_samples"] = cumulative_samples
+    report["total_latency_ms"] = cumulative_ms
+    report["cumulative_latency_samples"] = cumulative_samples
+    report["cumulative_latency_ms"] = cumulative_ms
+
+    tracks = {}
+    for device in devices:
+        track_index = device.get("track_index")
+        key = (str(track_index), device.get("track_name") or "Unnamed Track")
+        summary = tracks.setdefault(key, {
+            "track_name": device.get("track_name") or "Unnamed Track",
+            "track_index": track_index,
+            "track_kind": device.get("track_kind") or "unknown",
+            "track_kind_label": device.get("track_kind_label") or TRACK_KIND_LABELS["unknown"],
+            "total_latency_samples": 0,
+            "total_latency_ms": 0,
+            "device_count": 0,
+            "is_bottleneck": False,
+        })
+        summary["total_latency_samples"] += int(device.get("latency_samples") or 0)
+        summary["total_latency_ms"] += float(device.get("latency_ms") or 0)
+        summary["device_count"] += 1
+
+    tracks_summary = sorted(
+        tracks.values(),
+        key=lambda item: (item["total_latency_samples"], item["total_latency_ms"], item["device_count"]),
+        reverse=True,
+    )
+    for item in tracks_summary:
+        item["total_latency_ms"] = round(item["total_latency_ms"], 3)
+    bottleneck = tracks_summary[0] if tracks_summary else None
+    if bottleneck:
+        bottleneck["is_bottleneck"] = True
+    report["tracks_summary"] = tracks_summary
+    report["bottleneck_track"] = dict(bottleneck) if bottleneck else None
+    report["pdc_latency_samples"] = bottleneck["total_latency_samples"] if bottleneck else 0
+    report["pdc_latency_ms"] = bottleneck["total_latency_ms"] if bottleneck else 0
+    report["recommendations"] = generate_recommendations(report)
     return report
+
+
+def generate_recommendations(report):
+    recommendations = []
+    bottleneck = report.get("bottleneck_track")
+    if bottleneck and bottleneck.get("total_latency_samples", 0) > 0:
+        recommendations.append({
+            "type": "bottleneck",
+            "title": "Reduce the PDC bottleneck",
+            "message": (
+                f"{bottleneck['track_name']} is driving PDC at "
+                f"{bottleneck['total_latency_ms']:.1f} ms. Reducing latency on this track lowers "
+                "compensation for the entire set. Deactivating devices does not remove their PDC; "
+                "delete them or use Freeze and Flatten."
+            ),
+        })
+
+    multi_format = [
+        plugin for plugin in report.get("plugins", [])
+        if any("vst" in fmt.lower() for fmt in plugin.get("formats", []))
+        and any(fmt.lower() in ("au", "audio unit") for fmt in plugin.get("formats", []))
+    ]
+    if multi_format:
+        names = ", ".join(plugin["device_name"] for plugin in multi_format[:3])
+        recommendations.append({
+            "type": "format",
+            "title": "Compare available plugin formats",
+            "message": f"{names} appear as both VST and AU. Compare reported latency before choosing a format.",
+        })
+    return recommendations
 
 
 def _get_last_scan_time():
@@ -725,7 +803,7 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
 
     def log_message(self, format, *args):
-        return
+        logger.info("%s - %s", self.address_string(), format % args)
 
     def write_json(self, status, payload):
         payload = dict(payload)
@@ -781,28 +859,29 @@ class Handler(SimpleHTTPRequestHandler):
             if not _scan_lock.acquire(blocking=False):
                 self.write_json(429, {"error": "A scan is already in progress.", "code": "scan_in_progress"})
                 return
+            scan_status = copy.deepcopy(_last_status_payload or {})
             try:
                 self.write_json(200, export_latency_report())
             except ResponsePortConflict as exc:
-                status, payload = scan_error_payload(str(exc), "response_port_conflict")
+                status, payload = scan_error_payload(str(exc), "response_port_conflict", status=scan_status)
                 self.write_json(status, payload)
             except TimeoutError:
                 status, payload = scan_error_payload(
                     "AbletonOSC is not responding. Is Ableton Live running with AbletonOSC enabled?",
-                    "osc_timeout",
+                    "osc_timeout", status=scan_status,
                 )
                 self.write_json(status, payload)
             except ConnectionRefusedError:
-                status, payload = scan_error_payload("Cannot reach AbletonOSC on port 11000.", "osc_offline")
+                status, payload = scan_error_payload("Cannot reach AbletonOSC on port 11000.", "osc_offline", status=scan_status)
                 self.write_json(status, payload)
             except FileNotFoundError:
-                status, payload = scan_error_payload("Latency report file was not created by AbletonOSC.", "report_not_found")
+                status, payload = scan_error_payload("Latency report file was not created by AbletonOSC.", "report_not_found", status=scan_status)
                 self.write_json(status, payload)
             except json.JSONDecodeError:
-                status, payload = scan_error_payload("Latency report contains invalid JSON.", "invalid_json")
+                status, payload = scan_error_payload("Latency report contains invalid JSON.", "invalid_json", status=scan_status)
                 self.write_json(status, payload)
             except Exception as exc:
-                status, payload = scan_error_payload(str(exc), "unknown")
+                status, payload = scan_error_payload(str(exc), "unknown", status=scan_status)
                 self.write_json(status, payload)
             finally:
                 _scan_lock.release()
@@ -831,7 +910,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def reload_abletonosc():
-    OSCRequest(timeout=3.0).send("/live/api/reload")
+    OSCRequest(timeout=OSC_RELOAD_TIMEOUT).send("/live/api/reload")
 
 
 def create_web_server(requested_port):
@@ -913,7 +992,13 @@ def main():
     parser.add_argument("--reload-abletonosc", action="store_true", help="Ask AbletonOSC to reload its Python handlers")
     parser.add_argument("--port", type=int, default=WEB_PORT)
     parser.add_argument("--no-open", action="store_true", help="Do not open the browser automatically")
+    parser.add_argument("--verbose", action="store_true", help="Log HTTP requests and diagnostic details")
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
     if args.reload_abletonosc:
         reload_abletonosc()

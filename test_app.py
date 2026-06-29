@@ -335,6 +335,7 @@ def test_api_scan_failure_keeps_cached_report(api_server, isolated_cache, monkey
     )
     isolated_cache.write_text(json.dumps(cached_report))
     _mock_status(monkeypatch, live=True, osc=True, handler=True, automation=True)
+    app.build_status_payload()
     monkeypatch.setattr(app, "export_latency_report", lambda: (_ for _ in ()).throw(TimeoutError()))
 
     status, payload = _http_json(
@@ -651,6 +652,25 @@ def test_total_latency_computed(mixed_plugin_report):
     assert result["total_latency_ms"] == expected_ms
 
 
+def test_pdc_latency_uses_highest_track_total(mixed_plugin_report):
+    result = summarize_report(mixed_plugin_report)
+
+    assert result["pdc_latency_samples"] == 768
+    assert result["pdc_latency_ms"] == pytest.approx(17.415)
+    assert result["bottleneck_track"]["track_name"] == "Track 1"
+    assert result["bottleneck_track"]["is_bottleneck"] is True
+    assert result["tracks_summary"][0] == result["bottleneck_track"]
+    assert sum(track["is_bottleneck"] for track in result["tracks_summary"]) == 1
+
+
+def test_cumulative_latency_remains_backward_compatible(mixed_plugin_report):
+    result = summarize_report(mixed_plugin_report)
+
+    assert result["cumulative_latency_samples"] == result["total_latency_samples"]
+    assert result["cumulative_latency_ms"] == result["total_latency_ms"]
+    assert result["cumulative_latency_samples"] > result["pdc_latency_samples"]
+
+
 def test_latency_device_count_only_counts_positive(mixed_plugin_report):
     result = summarize_report(mixed_plugin_report)
     # Pro-Q 3 (AU) has 0 latency → not counted
@@ -858,7 +878,13 @@ def test_summarize_report_mutates_in_place_by_design():
     summarize_report(original)
     after_keys = set(original.keys())
     # Verify new keys were added in-place
-    assert after_keys - before_keys == {"plugins", "top_plugins", "latency_device_count", "total_latency_samples", "total_latency_ms"}
+    assert after_keys - before_keys == {
+        "plugins", "top_plugins", "latency_device_count",
+        "total_latency_samples", "total_latency_ms",
+        "cumulative_latency_samples", "cumulative_latency_ms",
+        "tracks_summary", "bottleneck_track",
+        "pdc_latency_samples", "pdc_latency_ms", "recommendations",
+    }
     # Devices list should be unchanged
     assert len(original["devices"]) == 1
     assert original["devices"][0]["device_name"] == "Original"
