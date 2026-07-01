@@ -50,9 +50,14 @@ def _device(**overrides):
     return d
 
 
-def _http_json(server, path, method="GET", headers=None):
+def _http_json(server, path, method="GET", headers=None, data=None):
     url = f"http://{server.server_address[0]}:{server.server_address[1]}{path}"
-    req = urllib.request.Request(url, method=method, headers=headers or {})
+    req_headers = dict(headers or {})
+    body = None
+    if data is not None:
+        body = json.dumps(data).encode("utf-8")
+        req_headers.setdefault("Content-Type", "application/json")
+    req = urllib.request.Request(url, method=method, headers=req_headers, data=body)
     try:
         with urllib.request.urlopen(req, timeout=3) as res:
             return res.status, json.loads(res.read().decode("utf-8"))
@@ -77,6 +82,13 @@ def isolated_cache(tmp_path, monkeypatch):
     cache_path = tmp_path / "abletonosc-latency-report.json"
     monkeypatch.setattr(app, "CACHED_REPORT_PATH", cache_path)
     return cache_path
+
+
+@pytest.fixture
+def isolated_settings(tmp_path, monkeypatch):
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(app, "SETTINGS_PATH", settings_path)
+    return settings_path
 
 
 def _mock_status(monkeypatch, *, live=True, osc=True, handler=True, automation=True, osc_error=None):
@@ -884,6 +896,7 @@ def test_summarize_report_mutates_in_place_by_design():
         "cumulative_latency_samples", "cumulative_latency_ms",
         "tracks_summary", "bottleneck_track",
         "pdc_latency_samples", "pdc_latency_ms", "recommendations",
+        "signal_path",
     }
     # Devices list should be unchanged
     assert len(original["devices"]) == 1
@@ -926,3 +939,385 @@ def test_api_last_scan_returns_cached_report(api_server, isolated_cache):
     assert payload["report"] is not None
     assert payload["report"]["plugins"][0]["device_name"] == "Cached Plugin"
     assert payload["report"]["plugins"][0]["instance_count"] == 1
+
+
+# ── Cached / Live State Transition Tests ──
+
+def test_export_latency_report_writes_project_and_timestamp(isolated_cache, monkeypatch, tmp_path):
+    dummy_report = tmp_path / "dummy-latency-report.json"
+    dummy_report.write_text(json.dumps({
+        "devices": [],
+        "sample_rate": 44100,
+        "buffer_size": 256,
+        "track_count": 0,
+        "device_count": 0,
+    }))
+
+    class MockOSCRequest:
+        def __init__(self, *args, **kwargs):
+            pass
+        def send(self, *args, **kwargs):
+            return {"args": [str(dummy_report)]}
+
+    monkeypatch.setattr(app, "OSCRequest", MockOSCRequest)
+    monkeypatch.setattr(app, "_get_current_live_set", lambda: {"name": "MyCoolProject.als", "path": "/Sessions/MyCoolProject.als"})
+
+    res = app.export_latency_report()
+
+    assert res["project"]["name"] == "MyCoolProject.als"
+    assert "timestamp" in res
+
+    with isolated_cache.open() as fh:
+        cached_data = json.load(fh)
+    
+    assert cached_data["project"]["name"] == "MyCoolProject.als"
+    assert "timestamp" in cached_data
+
+
+def test_load_cached_report_extracts_project_and_timestamp(isolated_cache):
+    report = {
+        "devices": [],
+        "sample_rate": 44100,
+        "buffer_size": 256,
+        "track_count": 0,
+        "device_count": 0,
+        "project": {"name": "TestProj.als", "path": "/path/TestProj.als"},
+        "timestamp": "2026-07-01T12:00:00Z"
+    }
+    isolated_cache.write_text(json.dumps(report))
+
+    loaded = app.load_cached_report()
+    assert loaded["project"]["name"] == "TestProj.als"
+    assert loaded["timestamp"] == "2026-07-01T12:00:00Z"
+
+
+def test_api_status_includes_cached_project_and_timestamp(api_server, isolated_cache, monkeypatch):
+    _mock_status(monkeypatch, live=False, osc=False, handler=False, automation=False)
+
+    report = {
+        "devices": [],
+        "sample_rate": 44100,
+        "buffer_size": 256,
+        "track_count": 0,
+        "device_count": 0,
+        "project": {"name": "StatusProj.als", "path": "/path/StatusProj.als"},
+        "timestamp": "2026-07-01T13:00:00Z"
+    }
+    isolated_cache.write_text(json.dumps(report))
+
+    status, payload = _http_json(api_server, "/api/status")
+    assert status == 200
+    assert payload["connection_state"] == "live_closed"
+    assert payload["cached_report"]["project"]["name"] == "StatusProj.als"
+    assert payload["cached_report"]["timestamp"] == "2026-07-01T13:00:00Z"
+
+
+# ── Settings Tests ──
+
+def test_load_settings_default(isolated_settings):
+    settings = app.load_settings()
+    assert settings == app.DEFAULT_SETTINGS
+
+
+def test_load_settings_persistence(isolated_settings):
+    custom = {
+        "auto_refresh": True,
+        "refresh_interval": 10,
+        "grouping": "plugin",
+        "workflow_mode": "custom_mode"
+    }
+    app.save_settings(custom)
+    
+    loaded = app.load_settings()
+    assert loaded == custom
+
+
+def test_load_settings_invalid_values(isolated_settings):
+    corrupt_data = {
+        "auto_refresh": "not_a_bool",
+        "refresh_interval": 42,
+        "grouping": "invalid_group",
+        "workflow_mode": 12345
+    }
+    isolated_settings.write_text(json.dumps(corrupt_data))
+    
+    loaded = app.load_settings()
+    assert loaded == app.DEFAULT_SETTINGS
+
+
+def test_api_get_settings(api_server, isolated_settings):
+    status, payload = _http_json(api_server, "/api/settings")
+    assert status == 200
+    assert payload["auto_refresh"] == app.DEFAULT_SETTINGS["auto_refresh"]
+    assert payload["refresh_interval"] == app.DEFAULT_SETTINGS["refresh_interval"]
+    assert payload["grouping"] == app.DEFAULT_SETTINGS["grouping"]
+    assert payload["workflow_mode"] == app.DEFAULT_SETTINGS["workflow_mode"]
+
+
+def test_api_post_settings_update(api_server, isolated_settings):
+    headers = {"X-Requested-With": "latency-manager"}
+    status, payload = _http_json(
+        api_server,
+        "/api/settings",
+        method="POST",
+        headers=headers
+    )
+    assert status == 200
+    assert payload["auto_refresh"] == app.DEFAULT_SETTINGS["auto_refresh"]
+
+    # Send actual updates
+    status, payload = _http_json(
+        api_server,
+        "/api/settings",
+        method="POST",
+        headers=headers,
+        data={"auto_refresh": True, "refresh_interval": 5, "grouping": "plugin"}
+    )
+    assert status == 200
+    assert payload["auto_refresh"] is True
+    assert payload["refresh_interval"] == 5
+    assert payload["grouping"] == "plugin"
+    assert payload["workflow_mode"] == "standard"
+
+
+def test_api_post_settings_reset(api_server, isolated_settings):
+    custom = {
+        "auto_refresh": True,
+        "refresh_interval": 10,
+        "grouping": "plugin",
+        "workflow_mode": "custom"
+    }
+    app.save_settings(custom)
+
+    headers = {"X-Requested-With": "latency-manager"}
+    status, payload = _http_json(
+        api_server,
+        "/api/settings",
+        method="POST",
+        headers=headers,
+        data={"reset": True}
+    )
+    assert status == 200
+    for key, val in app.DEFAULT_SETTINGS.items():
+        assert payload[key] == val
+
+
+def test_signal_path_nested_chains():
+    # Test nested chains (racks with parallel chains)
+    report = _base_report(
+        tracks=[{"index": 0, "name": "Track 1", "track_kind": "audio", "latency_samples": 20}],
+        devices=[
+            _device(device_name="Audio Effect Rack", class_name="AudioEffectGroupDevice", track_index=0, device_index=0, path=["Audio Effect Rack"], latency_samples=0, latency_ms=0),
+            _device(device_name="A_Plugin", class_name="AuPluginDevice", track_index=0, device_index=0, path=["Audio Effect Rack", "Chain A", "A_Plugin"], latency_samples=10, latency_ms=10),
+            _device(device_name="B_Plugin", class_name="AuPluginDevice", track_index=0, device_index=0, path=["Audio Effect Rack", "Chain B", "B_Plugin"], latency_samples=20, latency_ms=20)
+        ]
+    )
+    result = summarize_report(report)
+    sp = result["signal_path"]
+    
+    assert len(sp["tracks"]) == 1
+    track = sp["tracks"][0]
+    assert len(track["slots"]) == 1
+    
+    rack = track["slots"][0]
+    assert rack["type"] == "rack"
+    assert rack["device_name"] == "Audio Effect Rack"
+    assert len(rack["chains"]) == 2
+    
+    chain_a = next(c for c in rack["chains"] if c["chain_name"] == "Chain A")
+    chain_b = next(c for c in rack["chains"] if c["chain_name"] == "Chain B")
+    assert chain_a["devices"][0]["device_name"] == "A_Plugin"
+    assert chain_b["devices"][0]["device_name"] == "B_Plugin"
+    
+    assert rack["rack_internal_latency_samples"] == 20
+    assert rack["rack_internal_latency_ms"] == 20.0
+    
+    assert rack["accumulated_samples"] == 20
+    assert rack["accumulated_ms"] == 20.0
+
+
+def test_signal_path_groups_returns_main_classification():
+    # Test categorization of Return, Master, and Group/Regular tracks
+    report = _base_report(
+        tracks=[
+            {"index": 0, "name": "A", "track_kind": "return", "latency_samples": 10},
+            {"index": 1, "name": "Audio Track", "track_kind": "audio", "latency_samples": 0},
+            {"index": 2, "name": "Master", "track_kind": "master", "latency_samples": 5},
+            {"index": 3, "name": "Group Track", "track_kind": "group", "latency_samples": 0}
+        ],
+        devices=[
+            _device(device_name="Rev", track_index=0, latency_samples=10, latency_ms=10),
+            _device(device_name="Limiter", track_index=2, latency_samples=5, latency_ms=5)
+        ]
+    )
+    report["bottleneck_track"] = {"track_index": 0, "total_latency_samples": 10}
+    
+    result = summarize_report(report)
+    sp = result["signal_path"]
+    
+    assert len(sp["tracks"]) == 2
+    assert len(sp["returns"]) == 1
+    assert sp["main"] is not None
+    
+    assert sp["returns"][0]["name"] == "A"
+    assert sp["returns"][0]["is_bottleneck"] is True
+    assert sp["main"]["name"] == "Master"
+    assert sp["main"]["total_latency_samples"] == 5
+
+
+def test_signal_path_routing_preservation():
+    # Test routing fields and parent_track_index are preserved and processed
+    report = _base_report(
+        tracks=[
+            {"index": 0, "name": "Synth", "track_kind": "instrument", "parent_track_index": 1, "output_routing": 1},
+            {"index": 1, "name": "Bus", "track_kind": "group", "output_routing": "Main"}
+        ],
+        devices=[]
+    )
+    result = summarize_report(report)
+    sp = result["signal_path"]
+    
+    assert sp["routing_available"] is True
+    
+    synth = next(t for t in sp["tracks"] if t["index"] == 0)
+    assert synth["parent_track_index"] == 1
+    assert synth["group_track_name"] == "Bus"
+    assert synth["output_routing"] == 1
+    assert synth["routing_label"] == "Bus"
+    
+    bus = next(t for t in sp["tracks"] if t["index"] == 1)
+    assert bus["output_routing"] == "Main"
+    assert bus["routing_label"] == "Main"
+
+
+def test_signal_path_missing_and_malformed_data():
+    # Test that missing fields (path, active, latency_ms, etc.) are handled gracefully
+    report = _base_report(
+        tracks=[{"index": 0, "name": "Track 1"}],
+        devices=[
+            {"track_index": 0, "device_name": "Faulty Plugin", "active": None, "latency_samples": None, "latency_ms": None}
+        ]
+    )
+    result = summarize_report(report)
+    sp = result["signal_path"]
+    
+    assert len(sp["tracks"]) == 1
+    track = sp["tracks"][0]
+    assert len(track["slots"]) == 1
+    slot = track["slots"][0]
+    assert slot["device_name"] == "Faulty Plugin"
+    assert slot["latency_samples"] == 0
+    assert slot["latency_ms"] == 0.0
+    assert slot["active"] is None
+
+
+def test_generate_recommendations_single_bottleneck():
+    # Single track with one high-latency device
+    report = _base_report(
+        tracks=[{"index": 0, "name": "Track 1", "track_kind": "audio"}],
+        devices=[
+            _device(track_name="Track 1", track_index=0, device_name="Heavy Plugin", latency_samples=100, latency_ms=10.0, active=True)
+        ]
+    )
+    result = summarize_report(report)
+    recs = [r for r in result["recommendations"] if r["type"] == "bottleneck"]
+    
+    # We expect:
+    # 1. Freeze or flatten Track 1 (100 -> 0)
+    # 2. Freeze or remove Heavy Plugin on Track 1 (100 -> 0)
+    assert len(recs) == 2
+    
+    t_freeze = next(r for r in recs if r["action_type"] == "track_freeze")
+    assert t_freeze["track_name"] == "Track 1"
+    assert t_freeze["original_pdc_ms"] == 10.0
+    assert t_freeze["estimated_new_pdc_ms"] == 0.0
+    assert t_freeze["estimated_pdc_reduction_ms"] == 10.0
+    assert t_freeze["target_key"] == "channel:0"
+    
+    d_remove = next(r for r in recs if r["action_type"] == "device_removal")
+    assert d_remove["device_name"] == "Heavy Plugin"
+    assert d_remove["track_name"] == "Track 1"
+    assert d_remove["original_pdc_ms"] == 10.0
+    assert d_remove["estimated_new_pdc_ms"] == 0.0
+    assert d_remove["estimated_pdc_reduction_ms"] == 10.0
+    assert d_remove["target_key"] == "channel:0"
+
+
+def test_generate_recommendations_with_other_bottleneck():
+    # Track 1 has 100 ms, Track 2 has 80 ms
+    report = _base_report(
+        tracks=[
+            {"index": 0, "name": "Track 1", "track_kind": "audio"},
+            {"index": 1, "name": "Track 2", "track_kind": "audio"}
+        ],
+        devices=[
+            _device(track_name="Track 1", track_index=0, device_name="Heavy A", latency_samples=100, latency_ms=10.0, active=True),
+            _device(track_name="Track 2", track_index=1, device_name="Heavy B", latency_samples=80, latency_ms=8.0, active=True)
+        ]
+    )
+    result = summarize_report(report)
+    recs = [r for r in result["recommendations"] if r["type"] == "bottleneck"]
+    
+    # Track 1 Freeze: 10.0 -> 8.0 ms (reduction: 2.0 ms)
+    # Heavy A Removal: 10.0 -> 8.0 ms (reduction: 2.0 ms)
+    # Track 2 Freeze: 10.0 -> 10.0 ms (reduction: 0.0 ms)
+    # Heavy B Removal: 10.0 -> 10.0 ms (reduction: 0.0 ms)
+    assert len(recs) >= 4
+    
+    # The first recommendation should be Track 1 Freeze (PDC reduction 2.0 ms) or Heavy A removal
+    assert recs[0]["track_name"] == "Track 1"
+    assert recs[0]["estimated_pdc_reduction_ms"] == 2.0
+    assert recs[1]["track_name"] == "Track 1"
+    assert recs[1]["estimated_pdc_reduction_ms"] == 2.0
+    
+    # Track 2 Freeze should have 0 ms reduction
+    t2_freeze = next(r for r in recs if r["action_type"] == "track_freeze" and r["track_name"] == "Track 2")
+    assert t2_freeze["estimated_pdc_reduction_ms"] == 0.0
+    assert t2_freeze["estimated_new_pdc_ms"] == 10.0
+
+
+def test_generate_recommendations_ties():
+    # Tie: Track 1 has 100 ms, Track 2 has 100 ms
+    report = _base_report(
+        tracks=[
+            {"index": 0, "name": "Track 1", "track_kind": "audio"},
+            {"index": 1, "name": "Track 2", "track_kind": "audio"}
+        ],
+        devices=[
+            _device(track_name="Track 1", track_index=0, device_name="Heavy A", latency_samples=100, latency_ms=10.0, active=True),
+            _device(track_name="Track 2", track_index=1, device_name="Heavy B", latency_samples=100, latency_ms=10.0, active=True)
+        ]
+    )
+    result = summarize_report(report)
+    recs = [r for r in result["recommendations"] if r["type"] == "bottleneck"]
+    
+    # Modifying either track alone leaves the other at 10.0 ms, so reduction is 0.0 ms
+    for r in recs:
+        assert r["estimated_pdc_reduction_ms"] == 0.0
+        assert r["estimated_new_pdc_ms"] == 10.0
+
+
+def test_generate_recommendations_safe_handling():
+    # Inactive, unknown, and unavailable latency devices
+    report = _base_report(
+        tracks=[{"index": 0, "name": "Track 1", "track_kind": "audio"}],
+        devices=[
+            # Inactive with latency - should be recommended
+            _device(track_name="Track 1", track_index=0, device_name="Plugin Inactive", latency_samples=100, latency_ms=10.0, active=False),
+            # Unknown active with latency - should be recommended
+            _device(track_name="Track 1", track_index=0, device_name="Plugin Unknown", latency_samples=50, latency_ms=5.0, active=None),
+            # Unavailable latency (0) - should NOT be recommended
+            _device(track_name="Track 1", track_index=0, device_name="Plugin Zero", latency_samples=0, latency_ms=0.0, active=True)
+        ]
+    )
+    result = summarize_report(report)
+    recs = [r for r in result["recommendations"] if r["type"] == "bottleneck"]
+    
+    # Should include recommendations for Plugin Inactive and Plugin Unknown, but not Plugin Zero
+    device_names = {r.get("device_name") for r in recs if r.get("device_name")}
+    assert "Plugin Inactive" in device_names
+    assert "Plugin Unknown" in device_names
+    assert "Plugin Zero" not in device_names
+
+
+

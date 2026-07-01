@@ -67,6 +67,15 @@
 
     <main id="main-content" class="app-main" tabindex="-1">
     <section id="panel-scan" class="app-section" data-view="scan" role="tabpanel" aria-labelledby="tab-scan">
+      <div id="statusBanner" class="status-banner" hidden></div>
+      <div class="workflow-section">
+        <span class="workflow-label">Workflow:</span>
+        <div id="workflowSelector" class="workflow-selector" role="radiogroup" aria-label="Workflow mode">
+          <button type="button" class="workflow-btn" data-mode="recording" role="radio" aria-checked="true">Recording</button>
+          <button type="button" class="workflow-btn" data-mode="performing" role="radio" aria-checked="false">Performing</button>
+          <button type="button" class="workflow-btn" data-mode="mixing" role="radio" aria-checked="false">Mixing</button>
+        </div>
+      </div>
       <section class="dashboard-summary" aria-label="Dashboard summary">
       <div class="info-card" id="summaryCardLatency">
         <div class="info-card-header">
@@ -74,9 +83,20 @@
         </div>
         <div class="info-card-value">
           <strong id="totalLatencyMs" hidden>--</strong><span class="unit">ms</span>
+          <span id="latencySeverityBadge" class="severity-badge" hidden></span>
           <span id="latencySkeleton" class="skeleton skeleton-value" aria-hidden="true"></span>
         </div>
         <div class="info-card-meta"><span id="bottleneckTrack">Finding bottleneck…</span> · <span id="cumulativeLatencyMs" title="Sum of all device latencies across every track.">-- ms cumulative</span></div>
+        <details class="latency-disclosure">
+          <summary class="latency-disclosure-summary">
+            <span class="info-icon-inline" aria-hidden="true">i</span>
+            <span>PDC vs. Cumulative Latency</span>
+          </summary>
+          <div class="latency-disclosure-content">
+            <p><strong>PDC Latency</strong> is driven by the highest-latency track/path and affects set-wide compensation to keep tracks in sync.</p>
+            <p><strong>Cumulative Latency</strong> is the sum of reported device latency across the set and is not the amount every track is delayed.</p>
+          </div>
+        </details>
       </div>
 
       <div class="info-card" id="summaryCardBuffer">
@@ -85,6 +105,7 @@
         </div>
         <div class="info-card-value">
           <strong id="bufferSize" hidden>--</strong><span class="unit">/ <span id="sampleRate" hidden>--</span></span>
+          <span id="bufferSeverityBadge" class="severity-badge" hidden></span>
           <span id="bufferSkeleton" class="skeleton skeleton-value" aria-hidden="true"></span>
         </div>
         <div class="info-card-meta">
@@ -102,6 +123,30 @@
       <div class="recommendations-list">
         <div class="recommendations-empty">Run a scan and we'll suggest concrete steps to lower your session latency.</div>
       </div>
+    </section>
+
+    <section class="diagnostics-panel troubleshooting-panel" aria-label="Troubleshooting">
+      <details id="troubleshootingDetails" open>
+        <summary>
+          <span>What are you experiencing?</span>
+          <span class="diagnostics-summary">Interactive Symptom Diagnostic</span>
+        </summary>
+        <div id="troubleshootingBody" class="diagnostics-body">
+          <div class="troubleshooting-welcome" id="troubleshootingWelcome">
+            <p style="margin-bottom: 12px; color: var(--muted);">Select a symptom below to get a step-by-step troubleshooting path tailored to your current session:</p>
+            <div class="symptom-buttons">
+              <button type="button" class="symptom-btn" id="symptom-delay">Delay while playing or singing</button>
+              <button type="button" class="symptom-btn" id="symptom-late">Recorded audio lands late</button>
+              <button type="button" class="symptom-btn" id="symptom-sluggish">Playback feels sluggish</button>
+              <button type="button" class="symptom-btn" id="symptom-crackles">Crackles or dropouts</button>
+            </div>
+          </div>
+          <div class="troubleshooting-path" id="troubleshootingPath" hidden>
+            <button type="button" class="symptom-back-btn" id="symptomBackBtn">&larr; Back to symptoms</button>
+            <div id="troubleshootingContent"></div>
+          </div>
+        </div>
+      </details>
     </section>
 
     <section class="diagnostics-panel" aria-label="Diagnostics">
@@ -123,10 +168,12 @@
     </section>
 
     <section class="report-panel">
+      <!-- Before/After Verification Flow -->
+      <div id="comparisonPanel" class="comparison-panel" hidden></div>
       <div class="panel-header">
         <div>
           <h2>Plugins</h2>
-          <div class="legend">
+          <div class="legend" id="legendContainer">
             <span class="legend-item"><span class="dot green"></span>&lt; 20 ms</span>
             <span class="legend-item"><span class="dot yellow"></span>20-100 ms</span>
             <span class="legend-item"><span class="dot red"></span>100+ ms</span>
@@ -192,12 +239,91 @@
     </section>
 
     <section id="panel-settings" class="app-section" data-view="settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
-      <div class="placeholder-view">
-        <div class="placeholder-icon">
-          <span class="icon-settings" aria-hidden="true"></span>
+      <div class="settings-view">
+        <div class="settings-header">
+          <div class="settings-icon">
+            <span class="icon-settings" aria-hidden="true"></span>
+          </div>
+          <h2>Settings</h2>
+          <p>Configure default behaviors and preferences.</p>
         </div>
-        <h2>Settings</h2>
-        <p>Configuration options will appear here.</p>
+
+        <div class="settings-form">
+          <!-- Setting Card: Auto-refresh -->
+          <div class="settings-card">
+            <div class="settings-card-header">
+              <div class="settings-card-info">
+                <h3>Default auto-refresh</h3>
+                <p class="settings-desc">Enable auto-refresh by default on launch.</p>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="settingsAutoRefresh">
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Setting Card: Refresh Interval -->
+          <div class="settings-card">
+            <div class="settings-card-header">
+              <div class="settings-card-info">
+                <h3>Default refresh interval</h3>
+                <p class="settings-desc">How often the app scans when auto-refresh is active.</p>
+              </div>
+              <div class="settings-select-wrapper">
+                <select id="settingsRefreshInterval" class="settings-select">
+                  <option value="5">5 seconds</option>
+                  <option value="10">10 seconds</option>
+                  <option value="30">30 seconds</option>
+                  <option value="60">60 seconds</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- Setting Card: Grouping -->
+          <div class="settings-card">
+            <div class="settings-card-header">
+              <div class="settings-card-info">
+                <h3>Default grouping</h3>
+                <p class="settings-desc">How latency results are aggregated by default on launch.</p>
+              </div>
+              <div class="settings-select-wrapper">
+                <select id="settingsGrouping" class="settings-select">
+                  <option value="channel">By channel</option>
+                  <option value="plugin">By plugin</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- Setting Card: Workflow Mode -->
+          <div class="settings-card">
+            <div class="settings-card-header">
+              <div class="settings-card-info">
+                <h3>Default workflow mode</h3>
+                <p class="settings-desc">The default display profile for latency analysis.</p>
+              </div>
+              <div class="settings-select-wrapper">
+                <select id="settingsWorkflowMode" class="settings-select">
+                  <option value="standard">Standard</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- Actions Card: Reset & Maintenance -->
+          <div class="settings-card danger-zone">
+            <div class="settings-card-info">
+              <h3>Maintenance</h3>
+              <p class="settings-desc">Reset checklist status or clear local configuration.</p>
+            </div>
+            <div class="settings-actions">
+              <button id="btnResetOnboarding" class="settings-btn" type="button">Reset checklist</button>
+              <button id="btnResetPreferences" class="settings-btn danger" type="button">Reset all preferences</button>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -259,6 +385,11 @@
               <p>Project detection is macOS-specific and depends on Automation permissions plus Live exposing the open set path. Grant Automation permission if prompted, or check System Settings &rarr; Privacy &amp; Security &rarr; Automation.</p>
             </div>
           </details>
+        </div>
+        <div class="help-section">
+          <h3>Preferences</h3>
+          <p>If you need to re-run the setup checklist, you can reset your onboarding preference.</p>
+          <button id="resetOnboardingBtn" class="onboarding-btn onboarding-btn-secondary" type="button">Reset Onboarding Preference</button>
         </div>
       </div>
     </section>
@@ -352,5 +483,6 @@
   <script src="/api.js" defer></script>
   <script src="/components.js" defer></script>
   <script src="/app.js" defer></script>
+  <script src="/test_onboarding.js" defer></script>
 </body>
 </html>

@@ -36,6 +36,65 @@ REPORT_PATH = Path("/tmp/abletonosc-latency-report.json")
 APP_SUPPORT_DIR = Path.home() / "Library" / "Application Support" / "LatencyManager"
 CACHED_REPORT_PATH = APP_SUPPORT_DIR / "abletonosc-latency-report.json"
 LOCK_FILE = APP_SUPPORT_DIR / "latency_manager.lock"
+SETTINGS_PATH = APP_SUPPORT_DIR / "settings.json"
+DEFAULT_SETTINGS = {
+    "auto_refresh": False,
+    "refresh_interval": 30,
+    "grouping": "channel",
+    "workflow_mode": "standard",
+}
+
+
+def load_settings():
+    try:
+        if not SETTINGS_PATH.exists():
+            return dict(DEFAULT_SETTINGS)
+        with SETTINGS_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        settings = dict(DEFAULT_SETTINGS)
+        if isinstance(data.get("auto_refresh"), bool):
+            settings["auto_refresh"] = data["auto_refresh"]
+
+        if isinstance(data.get("refresh_interval"), int) and data["refresh_interval"] in [5, 10, 30, 60]:
+            settings["refresh_interval"] = data["refresh_interval"]
+
+        if data.get("grouping") in ["channel", "plugin"]:
+            settings["grouping"] = data["grouping"]
+
+        if isinstance(data.get("workflow_mode"), str):
+            settings["workflow_mode"] = data["workflow_mode"]
+
+        return settings
+    except Exception as exc:
+        logger.warning(f"Reading settings failed, using defaults: {exc}")
+        return dict(DEFAULT_SETTINGS)
+
+
+def save_settings(settings):
+    validated = dict(DEFAULT_SETTINGS)
+    if isinstance(settings.get("auto_refresh"), bool):
+        validated["auto_refresh"] = settings["auto_refresh"]
+
+    if isinstance(settings.get("refresh_interval"), int) and settings["refresh_interval"] in [5, 10, 30, 60]:
+        validated["refresh_interval"] = settings["refresh_interval"]
+
+    if settings.get("grouping") in ["channel", "plugin"]:
+        validated["grouping"] = settings["grouping"]
+
+    if isinstance(settings.get("workflow_mode"), str):
+        validated["workflow_mode"] = settings["workflow_mode"]
+
+    try:
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with SETTINGS_PATH.open("w", encoding="utf-8") as f:
+            json.dump(validated, f, indent=2)
+        return True
+    except Exception as exc:
+        logger.error(f"Writing settings failed: {exc}")
+        return False
+
+
 ABLETONOSC_HOST = "127.0.0.1"
 ABLETONOSC_PORT = 11000
 RESPONSE_PORT = 11001
@@ -383,15 +442,21 @@ def export_latency_report():
     with output_path.open() as fh:
         report = json.load(fh)
 
-    try:
-        CACHED_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(output_path), str(CACHED_REPORT_PATH))
-    except Exception:
-        print(f"Copying latency report to cache failed (non-fatal): {CACHED_REPORT_PATH}")
-
     # If AbletonOSC handler couldn't provide buffer_size, fall back to CoreAudio
     if not isinstance(report.get("buffer_size"), (int, float)) or report.get("buffer_size", 0) <= 0:
         report["buffer_size"] = _get_coreaudio_buffer_size()
+
+    current_project = _get_current_live_set()
+    if current_project:
+        report["project"] = current_project
+    report["timestamp"] = datetime.now(timezone.utc).isoformat()
+
+    try:
+        CACHED_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with CACHED_REPORT_PATH.open("w") as fh_cache:
+            json.dump(report, fh_cache, indent=2)
+    except Exception as exc:
+        print(f"Writing latency report to cache failed (non-fatal): {exc}")
 
     return summarize_report(report)
 
@@ -410,6 +475,212 @@ def load_cached_report():
     processed = summarize_report(report)
     _report_cache = {"path": cache_path, "mtime_ns": mtime_ns, "report": processed}
     return processed
+
+
+def compare_reports(baseline, current):
+    if not baseline or not current:
+        return None
+    
+    # Check if they are from the same project
+    proj_base = baseline.get("project")
+    proj_curr = current.get("project")
+    
+    # If one has project info and the other doesn't, they are different.
+    # If both have no project info, we can assume they are the same (e.g. if project detection is disabled/fails)
+    if (proj_base is None) != (proj_curr is None):
+        return None
+        
+    if proj_base and proj_curr:
+        base_path = proj_base.get("path")
+        curr_path = proj_curr.get("path")
+        if base_path and curr_path:
+            if base_path != curr_path:
+                return None
+        else:
+            base_name = proj_base.get("name")
+            curr_name = proj_curr.get("name")
+            if base_name != curr_name:
+                return None
+
+    # Calculate PDC Change
+    base_pdc = float(baseline.get("pdc_latency_ms") or 0)
+    curr_pdc = float(current.get("pdc_latency_ms") or 0)
+    pdc_delta = curr_pdc - base_pdc
+    
+    pdc_change_label = "No change"
+    pdc_change_status = "neutral"
+    
+    if pdc_delta < -0.05:
+        pdc_change_label = f"Improved by {abs(pdc_delta):.1f} ms"
+        pdc_change_status = "improved"
+    elif pdc_delta > 0.05:
+        pdc_change_label = f"Worsened by {pdc_delta:.1f} ms"
+        pdc_change_status = "worsened"
+    elif abs(pdc_delta) > 0.005:
+        if pdc_delta < 0:
+            pdc_change_label = f"Improved by {abs(pdc_delta):.2f} ms"
+            pdc_change_status = "improved"
+        else:
+            pdc_change_label = f"Worsened by {pdc_delta:.2f} ms"
+            pdc_change_status = "worsened"
+            
+    # Whether the suggested fix improved the bottleneck
+    prev_bottleneck = baseline.get("bottleneck_track")
+    bottleneck_improved = False
+    bottleneck_message = "No previous bottleneck track detected"
+    bottleneck_status = "neutral"
+    
+    if prev_bottleneck:
+        prev_track_index = prev_bottleneck.get("track_index")
+        prev_track_name = prev_bottleneck.get("track_name")
+        prev_latency = float(prev_bottleneck.get("total_latency_ms") or 0)
+        
+        # Find the track in the current report
+        curr_track = None
+        for t in current.get("tracks_summary", []):
+            if t.get("track_index") == prev_track_index:
+                curr_track = t
+                break
+                
+        curr_latency = float(curr_track.get("total_latency_ms") or 0) if curr_track else 0.0
+        track_delta = curr_latency - prev_latency
+        
+        if track_delta < -0.05:
+            bottleneck_improved = True
+            bottleneck_message = f"Improved bottleneck track “{prev_track_name}” by {abs(track_delta):.1f} ms"
+            bottleneck_status = "improved"
+        elif track_delta > 0.05:
+            bottleneck_improved = False
+            bottleneck_message = f"Worsened bottleneck track “{prev_track_name}” by {track_delta:.1f} ms"
+            bottleneck_status = "worsened"
+        elif abs(track_delta) > 0.005:
+            if track_delta < 0:
+                bottleneck_improved = True
+                bottleneck_message = f"Improved bottleneck track “{prev_track_name}” by {abs(track_delta):.2f} ms"
+                bottleneck_status = "improved"
+            else:
+                bottleneck_improved = False
+                bottleneck_message = f"Worsened bottleneck track “{prev_track_name}” by {track_delta:.2f} ms"
+                bottleneck_status = "worsened"
+        else:
+            bottleneck_improved = False
+            bottleneck_message = f"No change on bottleneck track “{prev_track_name}”"
+            bottleneck_status = "neutral"
+            
+    # Added/Removed latency-inducing devices
+    base_devices = baseline.get("devices", [])
+    curr_devices = current.get("devices", [])
+    
+    base_unmatched = list(base_devices)
+    curr_unmatched = list(curr_devices)
+    
+    added_devices = []
+    removed_devices = []
+    
+    # 1st pass: exact match (track_index, track_name, device_name, latency_samples)
+    for i in range(len(curr_unmatched) - 1, -1, -1):
+        curr = curr_unmatched[i]
+        match_idx = -1
+        for j, prev in enumerate(base_unmatched):
+            if (prev.get("track_index") == curr.get("track_index") and
+                prev.get("track_name") == curr.get("track_name") and
+                prev.get("device_name") == curr.get("device_name") and
+                prev.get("latency_samples") == curr.get("latency_samples")):
+                match_idx = j
+                break
+        if match_idx >= 0:
+            base_unmatched.pop(match_idx)
+            curr_unmatched.pop(i)
+            
+    # 2nd pass: loose match (track_index, track_name, device_name) - to find changed ones
+    for i in range(len(curr_unmatched) - 1, -1, -1):
+        curr = curr_unmatched[i]
+        match_idx = -1
+        for j, prev in enumerate(base_unmatched):
+            if (prev.get("track_index") == curr.get("track_index") and
+                prev.get("track_name") == curr.get("track_name") and
+                prev.get("device_name") == curr.get("device_name")):
+                match_idx = j
+                break
+        if match_idx >= 0:
+            base_unmatched.pop(match_idx)
+            curr_unmatched.pop(i)
+            
+    # Any remaining in curr_unmatched are added
+    for d in curr_unmatched:
+        added_devices.append({
+            "device_name": d.get("device_name") or "Unnamed Device",
+            "track_name": d.get("track_name") or "Unnamed Track",
+            "latency_ms": float(d.get("latency_ms") or 0),
+            "latency_samples": int(d.get("latency_samples") or 0)
+        })
+        
+    # Any remaining in base_unmatched are removed
+    for d in base_unmatched:
+        removed_devices.append({
+            "device_name": d.get("device_name") or "Unnamed Device",
+            "track_name": d.get("track_name") or "Unnamed Track",
+            "latency_ms": float(d.get("latency_ms") or 0),
+            "latency_samples": int(d.get("latency_samples") or 0)
+        })
+        
+    # Changed tracks and plugins
+    changed_tracks = []
+    changed_plugins = []
+    
+    # Match tracks by index
+    base_tracks = {t.get("track_index"): t for t in baseline.get("tracks_summary", [])}
+    curr_tracks = {t.get("track_index"): t for t in current.get("tracks_summary", [])}
+    
+    for idx, curr_t in curr_tracks.items():
+        if idx in base_tracks:
+            base_t = base_tracks[idx]
+            latency_diff = float(curr_t.get("total_latency_ms", 0)) - float(base_t.get("total_latency_ms", 0))
+            device_diff = int(curr_t.get("device_count", 0)) - int(base_t.get("device_count", 0))
+            if abs(latency_diff) > 0.005 or device_diff != 0:
+                changed_tracks.append({
+                    "track_name": curr_t.get("track_name") or "Unnamed Track",
+                    "track_index": idx,
+                    "old_latency_ms": float(base_t.get("total_latency_ms") or 0),
+                    "new_latency_ms": float(curr_t.get("total_latency_ms") or 0),
+                    "old_device_count": int(base_t.get("device_count") or 0),
+                    "new_device_count": int(curr_t.get("device_count") or 0),
+                })
+                
+    # Match plugins by key
+    def get_plugin_group_key(p):
+        return f"{p.get('device_name')}|{p.get('format')}"
+        
+    base_plugins = {get_plugin_group_key(p): p for p in baseline.get("plugins", [])}
+    curr_plugins = {get_plugin_group_key(p): p for p in current.get("plugins", [])}
+    
+    for key, curr_p in curr_plugins.items():
+        if key in base_plugins:
+            base_p = base_plugins[key]
+            latency_diff = float(curr_p.get("max_latency_ms", 0)) - float(base_p.get("max_latency_ms", 0))
+            count_diff = int(curr_p.get("instance_count", 0)) - int(base_p.get("instance_count", 0))
+            if abs(latency_diff) > 0.005 or count_diff != 0:
+                changed_plugins.append({
+                    "device_name": curr_p.get("device_name") or "Unnamed Device",
+                    "format": curr_p.get("format") or "Unknown",
+                    "old_max_latency_ms": float(base_p.get("max_latency_ms") or 0),
+                    "new_max_latency_ms": float(curr_p.get("max_latency_ms") or 0),
+                    "old_instance_count": int(base_p.get("instance_count") or 0),
+                    "new_instance_count": int(curr_p.get("instance_count") or 0),
+                })
+                
+    return {
+        "pdc_change_label": pdc_change_label,
+        "pdc_change_status": pdc_change_status,
+        "pdc_delta_ms": pdc_delta,
+        "bottleneck_improved": bottleneck_improved,
+        "bottleneck_message": bottleneck_message,
+        "bottleneck_status": bottleneck_status,
+        "added_devices": added_devices,
+        "removed_devices": removed_devices,
+        "changed_tracks": changed_tracks,
+        "changed_plugins": changed_plugins,
+    }
 
 
 def scan_error_payload(message, code, status_code=502, status=None):
@@ -686,24 +957,398 @@ def summarize_report(report):
     report["pdc_latency_samples"] = bottleneck["total_latency_samples"] if bottleneck else 0
     report["pdc_latency_ms"] = bottleneck["total_latency_ms"] if bottleneck else 0
     report["recommendations"] = generate_recommendations(report)
+    _build_signal_path(report)
     return report
+
+
+def _build_track_slots(track_devices):
+    # 1. Separate top-level and nested devices
+    top_level = []
+    nested = []
+    
+    for d in track_devices:
+        path = d.get("path") or []
+        if len(path) <= 1:
+            top_level.append(d)
+        else:
+            nested.append(d)
+            
+    # Sort top-level by device_index
+    top_level.sort(key=lambda x: x.get("device_index") or 0)
+    
+    slots = []
+    slots_by_name = {}
+    
+    for d in top_level:
+        slot = {
+            "type": "device",
+            "device_name": d.get("device_name") or "Unnamed Device",
+            "class_name": d.get("class_name"),
+            "format": d.get("format"),
+            "latency_samples": d.get("latency_samples") or 0,
+            "latency_ms": d.get("latency_ms") or 0.0,
+            "active": d.get("active"),
+            "latency_available": d.get("latency_available", True),
+            "device_index": d.get("device_index"),
+        }
+        slots.append(slot)
+        slots_by_name[d.get("device_name")] = slot
+        
+    # Group nested devices under parent Rack
+    for d in nested:
+        path = d.get("path") or []
+        parent_name = path[0]
+        
+        if parent_name not in slots_by_name:
+            # Create a placeholder Rack slot
+            parent_slot = {
+                "type": "rack",
+                "device_name": parent_name,
+                "class_name": "AudioEffectGroupDevice", # fallback
+                "format": "Live Device",
+                "latency_samples": 0,
+                "latency_ms": 0.0,
+                "active": True,
+                "latency_available": True,
+                "device_index": d.get("device_index") or 0,
+                "chains": {}
+            }
+            slots.append(parent_slot)
+            slots_by_name[parent_name] = parent_slot
+            
+        parent_slot = slots_by_name[parent_name]
+        parent_slot["type"] = "rack"
+        if "chains" not in parent_slot:
+            parent_slot["chains"] = {}
+            
+        chain_name = path[1] if len(path) >= 2 else "Chain"
+        
+        # Check if chain_index/chain_name is genuinely supplied in nested device
+        chain_index = d.get("chain_index")
+        chain_name_opt = d.get("chain_name") or chain_name
+        
+        if chain_name_opt not in parent_slot["chains"]:
+            parent_slot["chains"][chain_name_opt] = {
+                "chain_name": chain_name_opt,
+                "chain_index": chain_index, # preserved only when genuinely supplied
+                "devices": []
+            }
+            
+        nested_device = {
+            "device_name": d.get("device_name") or "Unnamed Device",
+            "class_name": d.get("class_name"),
+            "format": d.get("format"),
+            "latency_samples": d.get("latency_samples") or 0,
+            "latency_ms": d.get("latency_ms") or 0.0,
+            "active": d.get("active"),
+            "latency_available": d.get("latency_available", True),
+            "device_index": d.get("device_index") or 0,
+            "chain_index": chain_index, # preserved only when genuinely supplied
+            "chain_name": d.get("chain_name") # preserved only when genuinely supplied
+        }
+        parent_slot["chains"][chain_name_opt]["devices"].append(nested_device)
+        
+    # Post-process Rack slots to convert chains dict to a list
+    for slot in slots:
+        if slot["type"] == "rack":
+            chains_list = []
+            for c_name, c_data in slot["chains"].items():
+                c_data["devices"].sort(key=lambda x: x.get("device_index") or 0)
+                chains_list.append(c_data)
+                
+            # Sort chains: use chain_index if present, otherwise by chain_name
+            chains_list.sort(key=lambda x: (x["chain_index"] if x.get("chain_index") is not None else -1, x["chain_name"]))
+            slot["chains"] = chains_list
+            
+            # Latency of the Rack is the maximum latency of its parallel chains
+            rack_samples = 0
+            rack_ms = 0.0
+            for chain in chains_list:
+                chain_samples = sum(dev.get("latency_samples") or 0 for dev in chain["devices"])
+                chain_ms = sum(dev.get("latency_ms") or 0.0 for dev in chain["devices"])
+                rack_samples = max(rack_samples, chain_samples)
+                rack_ms = max(rack_ms, chain_ms)
+                
+            slot["rack_internal_latency_samples"] = rack_samples
+            slot["rack_internal_latency_ms"] = round(rack_ms, 3)
+            
+    # Sort slots by device_index
+    slots.sort(key=lambda x: x.get("device_index") or 0)
+    return slots
+
+
+def _build_signal_path(report):
+    tracks = report.get("tracks") or []
+    devices = report.get("devices") or []
+    
+    # 1. Group devices by track_index
+    devices_by_track = defaultdict(list)
+    for device in devices:
+        t_idx = device.get("track_index")
+        if t_idx is not None:
+            devices_by_track[t_idx].append(device)
+            
+    # 2. Extract and classify tracks
+    structured_tracks = []
+    structured_returns = []
+    structured_main = None
+    
+    bottleneck_track = report.get("bottleneck_track")
+    bottleneck_idx = bottleneck_track.get("track_index") if bottleneck_track else None
+    
+    for track in tracks:
+        t_idx = track.get("index")
+        t_name = track.get("name") or "Unnamed Track"
+        
+        # Check track kinds/types
+        t_kind = track.get("track_kind") or "unknown"
+        t_type = track.get("track_type") # only use if genuinely supplied
+        
+        is_main = False
+        is_return = False
+        
+        if t_type is not None:
+            if str(t_type).lower() == "master" or t_type == 4:
+                is_main = True
+            elif str(t_type).lower() == "return" or t_type == 3:
+                is_return = True
+        else:
+            if t_kind == "return" or (len(t_name) == 1 and t_name.isalpha() and t_name.isupper()):
+                is_return = True
+            elif t_name.lower() in ("master", "main") or t_kind == "master":
+                is_main = True
+                
+        # Build device chain (slots) for this track
+        track_devices = devices_by_track.get(t_idx, [])
+        slots = _build_track_slots(track_devices)
+        
+        # Calculate accumulated latency
+        accum_samples = 0
+        accum_ms = 0.0
+        for slot in slots:
+            slot_samples = slot.get("latency_samples") or 0
+            slot_ms = slot.get("latency_ms") or 0.0
+            
+            if slot.get("type") == "rack":
+                slot_samples += slot.get("rack_internal_latency_samples") or 0
+                slot_ms += slot.get("rack_internal_latency_ms") or 0.0
+                
+            accum_samples += slot_samples
+            accum_ms += slot_ms
+            
+            slot["accumulated_samples"] = accum_samples
+            slot["accumulated_ms"] = round(accum_ms, 3)
+            
+        is_bottleneck = (t_idx == bottleneck_idx) if t_idx is not None else False
+        
+        # Preserving routing fields only if genuinely supplied in track/devices
+        output_routing = track.get("output_routing") or track.get("output_track_index")
+        routing_label = None
+        if output_routing is not None:
+            dest_track = next((t for t in tracks if t.get("index") == output_routing), None)
+            if dest_track:
+                routing_label = dest_track.get("name") or f"Track {output_routing}"
+            else:
+                routing_label = "Main" if str(output_routing).lower() == "main" else f"Track {output_routing}"
+        
+        parent_track_idx = track.get("parent_track_index") or track.get("group_track_index")
+        group_track_name = None
+        if parent_track_idx is not None:
+            parent_track = next((t for t in tracks if t.get("index") == parent_track_idx), None)
+            if parent_track:
+                group_track_name = parent_track.get("name")
+                
+        track_data = {
+            "index": t_idx,
+            "name": t_name,
+            "track_kind": t_kind,
+            "track_kind_label": track.get("track_kind_label") or "Track",
+            "track_type": t_type, # preserved only when genuinely supplied
+            "device_count": len(track_devices),
+            "total_latency_samples": track.get("latency_samples") or 0,
+            "total_latency_ms": round(float((track.get("latency_samples") or 0) / report.get("sample_rate", 44100) * 1000), 3) if track.get("latency_samples") is not None else 0.0,
+            "slots": slots,
+            "is_bottleneck": is_bottleneck,
+            "output_routing": output_routing,
+            "routing_label": routing_label,
+            "parent_track_index": parent_track_idx,
+            "group_track_name": group_track_name
+        }
+        
+        if "latency_ms" in track:
+            track_data["total_latency_ms"] = float(track["latency_ms"])
+        elif len(slots) > 0:
+            track_data["total_latency_ms"] = slots[-1]["accumulated_ms"]
+            track_data["total_latency_samples"] = slots[-1]["accumulated_samples"]
+            
+        if is_main:
+            structured_main = track_data
+        elif is_return:
+            structured_returns.append(track_data)
+        else:
+            structured_tracks.append(track_data)
+            
+    def _sort_key(t):
+        return (not t["is_bottleneck"], -t["total_latency_samples"], t["index"] if t["index"] is not None else 0)
+        
+    structured_tracks.sort(key=_sort_key)
+    structured_returns.sort(key=_sort_key)
+    
+    has_routing = any(t.get("output_routing") is not None or t.get("parent_track_index") is not None for t in structured_tracks + structured_returns)
+    
+    report["signal_path"] = {
+        "routing_available": has_routing,
+        "tracks": structured_tracks,
+        "returns": structured_returns,
+        "main": structured_main,
+        "pdc_bottleneck_track_index": bottleneck_idx
+    }
+
+
+
+def is_numeric(val):
+    if val is None or val == "":
+        return False
+    try:
+        float(val)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def get_track_key(track_index, track_name):
+    if track_index is not None and str(track_index).strip() != "" and not isinstance(track_index, bool):
+        try:
+            float(track_index)
+            val = float(track_index)
+            if val.is_integer():
+                return f"channel:{int(val)}"
+            return f"channel:{val}"
+        except (ValueError, TypeError):
+            pass
+    name = track_name or "Unnamed Track"
+    return f"channel:{name}"
 
 
 def generate_recommendations(report):
     recommendations = []
-    bottleneck = report.get("bottleneck_track")
-    if bottleneck and bottleneck.get("total_latency_samples", 0) > 0:
-        recommendations.append({
-            "type": "bottleneck",
-            "title": "Reduce the PDC bottleneck",
-            "message": (
-                f"{bottleneck['track_name']} is driving PDC at "
-                f"{bottleneck['total_latency_ms']:.1f} ms. Reducing latency on this track lowers "
-                "compensation for the entire set. Deactivating devices does not remove their PDC; "
-                "delete them or use Freeze and Flatten."
-            ),
-        })
+    
+    current_pdc_samples = report.get("pdc_latency_samples", 0)
+    current_pdc_ms = report.get("pdc_latency_ms", 0.0)
+    devices = report.get("devices", [])
+    tracks_summary = report.get("tracks_summary", [])
+    
+    if current_pdc_samples > 0:
+        track_latencies_samples = {}
+        track_latencies_ms = {}
+        for t in tracks_summary:
+            t_index = t.get("track_index")
+            t_name = t.get("track_name") or "Unnamed Track"
+            t_key = get_track_key(t_index, t_name)
+            track_latencies_samples[t_key] = t.get("total_latency_samples", 0)
+            track_latencies_ms[t_key] = t.get("total_latency_ms", 0.0)
+            
+        bottleneck_recs = []
+        
+        # 1. Device recommendations
+        for d in devices:
+            d_samples = int(d.get("latency_samples") or 0)
+            if d_samples <= 0:
+                continue
+            d_ms = float(d.get("latency_ms") or 0.0)
+            
+            t_index = d.get("track_index")
+            t_name = d.get("track_name") or "Unnamed Track"
+            t_key = get_track_key(t_index, t_name)
+            
+            # Calculate new PDC if this device is removed
+            new_t_samples = max(0, track_latencies_samples.get(t_key, 0) - d_samples)
+            new_t_ms = max(0.0, track_latencies_ms.get(t_key, 0.0) - d_ms)
+            
+            other_max_samples = max([lat for tk, lat in track_latencies_samples.items() if tk != t_key] or [0])
+            other_max_ms = max([lat for tk, lat in track_latencies_ms.items() if tk != t_key] or [0.0])
+            
+            new_pdc_samples = max(new_t_samples, other_max_samples)
+            new_pdc_ms = max(new_t_ms, other_max_ms)
+            
+            pdc_reduction_samples = max(0, current_pdc_samples - new_pdc_samples)
+            pdc_reduction_ms = max(0.0, current_pdc_ms - new_pdc_ms)
+            
+            d_name = d.get("device_name") or "Unnamed Device"
+            
+            rec = {
+                "type": "bottleneck",
+                "title": f"Freeze or remove {d_name} on {t_name}",
+                "message": f"Estimated PDC: {current_pdc_ms:.1f} ms → {new_pdc_ms:.1f} ms\nRescan to verify",
+                "action_type": "device_removal",
+                "device_name": d_name,
+                "plugin_names": [d_name],
+                "track_name": t_name,
+                "track_index": t_index,
+                "target_key": t_key,
+                "latency_samples": d_samples,
+                "latency_ms": d_ms,
+                "original_pdc_samples": current_pdc_samples,
+                "original_pdc_ms": current_pdc_ms,
+                "estimated_new_pdc_samples": new_pdc_samples,
+                "estimated_new_pdc_ms": new_pdc_ms,
+                "estimated_pdc_reduction_samples": pdc_reduction_samples,
+                "estimated_pdc_reduction_ms": pdc_reduction_ms,
+            }
+            bottleneck_recs.append(rec)
+            
+        # 2. Track recommendations
+        for t in tracks_summary:
+            t_samples = int(t.get("total_latency_samples") or 0)
+            if t_samples <= 0:
+                continue
+            t_ms = float(t.get("total_latency_ms") or 0.0)
+            
+            t_index = t.get("track_index")
+            t_name = t.get("track_name") or "Unnamed Track"
+            t_key = get_track_key(t_index, t_name)
+            
+            # Calculate new PDC if this track is frozen (its latency becomes 0)
+            other_max_samples = max([lat for tk, lat in track_latencies_samples.items() if tk != t_key] or [0])
+            other_max_ms = max([lat for tk, lat in track_latencies_ms.items() if tk != t_key] or [0.0])
+            
+            new_pdc_samples = max(0, other_max_samples)
+            new_pdc_ms = max(0.0, other_max_ms)
+            
+            pdc_reduction_samples = max(0, current_pdc_samples - new_pdc_samples)
+            pdc_reduction_ms = max(0.0, current_pdc_ms - new_pdc_ms)
+            
+            rec = {
+                "type": "bottleneck",
+                "title": f"Freeze or flatten {t_name}",
+                "message": f"Estimated PDC: {current_pdc_ms:.1f} ms → {new_pdc_ms:.1f} ms\nRescan to verify",
+                "action_type": "track_freeze",
+                "track_name": t_name,
+                "track_index": t_index,
+                "target_key": t_key,
+                "latency_samples": t_samples,
+                "latency_ms": t_ms,
+                "original_pdc_samples": current_pdc_samples,
+                "original_pdc_ms": current_pdc_ms,
+                "estimated_new_pdc_samples": new_pdc_samples,
+                "estimated_new_pdc_ms": new_pdc_ms,
+                "estimated_pdc_reduction_samples": pdc_reduction_samples,
+                "estimated_pdc_reduction_ms": pdc_reduction_ms,
+            }
+            bottleneck_recs.append(rec)
+            
+            # Sort bottleneck recommendations
+        bottleneck_recs.sort(key=lambda r: (
+            -r["estimated_pdc_reduction_samples"],
+            -r["latency_samples"],
+            r["track_index"] if r["track_index"] is not None else 999999,
+            r.get("device_name", "")
+        ))
+        
+        # Take the top 5 unique-ish bottleneck recommendations
+        recommendations.extend(bottleneck_recs[:5])
 
+    # Check format recommendations
     multi_format = [
         plugin for plugin in report.get("plugins", [])
         if any("vst" in fmt.lower() for fmt in plugin.get("formats", []))
@@ -715,6 +1360,7 @@ def generate_recommendations(report):
             "type": "format",
             "title": "Compare available plugin formats",
             "message": f"{names} appear as both VST and AU. Compare reported latency before choosing a format.",
+            "plugin_names": [plugin["device_name"] for plugin in multi_format[:3]],
         })
     return recommendations
 
@@ -833,7 +1479,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "schema_version": API_SCHEMA_VERSION,
                 "app_id": API_APP_ID,
                 "transport": "local-only",
-                "endpoints": ["/api/status", "/api/scan", "/api/onboarding", "/api/last-scan"],
+                "endpoints": ["/api/status", "/api/scan", "/api/onboarding", "/api/last-scan", "/api/settings"],
             })
             return
         if path == "/api/status":
@@ -846,12 +1492,49 @@ class Handler(SimpleHTTPRequestHandler):
             cached = load_cached_report()
             self.write_json(200, {"report": cached})
             return
+        if path == "/api/settings":
+            self.write_json(200, load_settings())
+            return
         if path == "/":
             self.path = "/index.html"
         return super().do_GET()
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/settings":
+            if not self._local_request():
+                self.write_json(403, {"error": "Forbidden", "code": "forbidden"})
+                return
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length > 0:
+                try:
+                    body = self.rfile.read(content_length).decode("utf-8")
+                    data = json.loads(body)
+                except Exception:
+                    self.write_json(400, {"error": "Invalid JSON", "code": "invalid_json"})
+                    return
+            else:
+                data = {}
+
+            if data.get("reset") is True:
+                save_settings(DEFAULT_SETTINGS)
+                self.write_json(200, load_settings())
+                return
+
+            current = load_settings()
+            if "auto_refresh" in data:
+                current["auto_refresh"] = data["auto_refresh"]
+            if "refresh_interval" in data:
+                current["refresh_interval"] = data["refresh_interval"]
+            if "grouping" in data:
+                current["grouping"] = data["grouping"]
+            if "workflow_mode" in data:
+                current["workflow_mode"] = data["workflow_mode"]
+
+            save_settings(current)
+            self.write_json(200, load_settings())
+            return
+
         if path == "/api/scan":
             if not self._local_request():
                 self.write_json(403, {"error": "Forbidden", "code": "forbidden"})
@@ -861,7 +1544,13 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             scan_status = copy.deepcopy(_last_status_payload or {})
             try:
-                self.write_json(200, export_latency_report())
+                baseline = load_cached_report()
+                new_report = export_latency_report()
+                comparison = compare_reports(baseline, new_report)
+                if comparison:
+                    new_report["comparison"] = comparison
+                    new_report["previous_report"] = baseline
+                self.write_json(200, new_report)
             except ResponsePortConflict as exc:
                 status, payload = scan_error_payload(str(exc), "response_port_conflict", status=scan_status)
                 self.write_json(status, payload)

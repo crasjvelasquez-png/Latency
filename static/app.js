@@ -11,6 +11,7 @@ const dom = {
   sessionSkeletons: $("sessionSkeletons"),
   timestampSkeleton: $("timestampSkeleton"),
   diagnosticsSkeletons: $("diagnosticsSkeletons"),
+  statusBanner: $("statusBanner"),
 };
 
 let _domDeferred = null;
@@ -49,6 +50,13 @@ function getDom() {
     sessionSkeletons: $("sessionSkeletons"),
     diagnosticsSkeletons: $("diagnosticsSkeletons"),
     recommendations: $("recommendations"),
+    workflowSelector: $("workflowSelector"),
+    troubleshootingDetails: $("troubleshootingDetails"),
+    troubleshootingWelcome: $("troubleshootingWelcome"),
+    troubleshootingPath: $("troubleshootingPath"),
+    troubleshootingContent: $("troubleshootingContent"),
+    symptomBackBtn: $("symptomBackBtn"),
+    comparisonPanel: $("comparisonPanel"),
   };
   return _domDeferred;
 }
@@ -79,7 +87,73 @@ const state = {
   currentView: "scan",
   viewScrollPositions: new Map(),
   transitioning: false,
+  liveRunning: false,
+  isLiveScan: false,
+  workflowMode: "recording",
+  activeSymptom: null,
 };
+
+const WORKFLOW_RULES = {
+  recording: {
+    name: "Recording",
+    description: "For tracking instruments or vocals. Low monitoring latency is critical.",
+    pdc: {
+      lowLimit: 5,
+      mediumLimit: 12,
+      labels: { low: "Tight", medium: "Acceptable", high: "Noticeable" }
+    },
+    device: {
+      lowLimit: 2,
+      mediumLimit: 6,
+      labels: { low: "Low", medium: "Moderate", high: "High" }
+    },
+    buffer: {
+      lowLimit: 128,
+      mediumLimit: 256,
+      labels: { low: "Optimal", medium: "Acceptable", high: "High" }
+    }
+  },
+  performing: {
+    name: "Performing",
+    description: "For live stage performance. Tight, consistent timing is essential.",
+    pdc: {
+      lowLimit: 8,
+      mediumLimit: 15,
+      labels: { low: "Tight", medium: "Acceptable", high: "Noticeable" }
+    },
+    device: {
+      lowLimit: 3,
+      mediumLimit: 8,
+      labels: { low: "Low", medium: "Moderate", high: "High" }
+    },
+    buffer: {
+      lowLimit: 128,
+      mediumLimit: 256,
+      labels: { low: "Optimal", medium: "Acceptable", high: "High" }
+    }
+  },
+  mixing: {
+    name: "Mixing",
+    description: "For editing and blending. Higher latency is fine as PDC keeps tracks aligned.",
+    pdc: {
+      lowLimit: 40,
+      mediumLimit: 100,
+      labels: { low: "Responsive", medium: "Acceptable", high: "Sluggish" }
+    },
+    device: {
+      lowLimit: 15,
+      mediumLimit: 50,
+      labels: { low: "Low", medium: "Moderate", high: "High" }
+    },
+    buffer: {
+      lowLimit: 512,
+      mediumLimit: 1024,
+      labels: { low: "Standard", medium: "Large", high: "Very Large" }
+    }
+  }
+};
+
+const WORKFLOW_MODES = Object.keys(WORKFLOW_RULES);
 
 const activeTweens = new Map();
 let tweenFrameId = null;
@@ -676,6 +750,9 @@ async function refreshStatus() {
     }
     if (!state.latestReport && data.cached_report) {
       renderReport(data.cached_report);
+    } else if (state.latestReport) {
+      updateStatusBanner();
+      setTotalLatencySeverity(state.latestReport.pdc_latency_ms, !state.isLiveScan || !state.liveRunning);
     }
   } catch {
     if (!preserveConnectedDuringBackgroundScan()) setStatus("scan_failed");
@@ -738,12 +815,99 @@ function renderError(message, title = "Scan failed") {
   });
 }
 
-function getLatencyClass(samples, ms, sampleRate) {
+function getLatencyClass(samples, ms, type = "device", sampleRate = null) {
   const rate = Number(sampleRate || state.latestReport?.sample_rate || 48000);
+  const rules = WORKFLOW_RULES[state.workflowMode || "recording"];
+  const thresholds = rules[type] || rules.device;
+
+  if (type === "buffer") {
+    const bufferVal = Number(samples || 0);
+    if (bufferVal <= thresholds.lowLimit) return "low";
+    if (bufferVal <= thresholds.mediumLimit) return "medium";
+    return "high";
+  }
+
   const latencyMs = hasNumericValue(ms) ? Number(ms) : (Number(samples || 0) / rate * 1000);
-  if (latencyMs < 20) return "low";
-  if (latencyMs > 100) return "high";
-  return "medium";
+  if (latencyMs <= thresholds.lowLimit) return "low";
+  if (latencyMs <= thresholds.mediumLimit) return "medium";
+  return "high";
+}
+
+function getLatencyLabel(samples, ms, type = "device", sampleRate = null) {
+  const cls = getLatencyClass(samples, ms, type, sampleRate);
+  const rules = WORKFLOW_RULES[state.workflowMode || "recording"];
+  const thresholds = rules[type] || rules.device;
+  return thresholds.labels[cls];
+}
+
+function updateLegend() {
+  const container = $("legendContainer");
+  if (!container) return;
+
+  const metricType = state.groupMode === "channel" ? "pdc" : "device";
+  const metricRules = WORKFLOW_RULES[state.workflowMode || "recording"][metricType];
+  const lowRangeStart = typeof metricRules.lowLimit === "number" ? metricRules.lowLimit.toFixed(metricRules.lowLimit % 1 ? 1 : 0) : metricRules.lowLimit;
+  const mediumRangeEnd = typeof metricRules.mediumLimit === "number" ? metricRules.mediumLimit.toFixed(metricRules.mediumLimit % 1 ? 1 : 0) : metricRules.mediumLimit;
+
+  container.innerHTML = `
+    <span class="legend-item"><span class="dot green"></span>${escapeHtml(metricRules.labels.low)} · &le; ${lowRangeStart} ms</span>
+    <span class="legend-item"><span class="dot yellow"></span>${escapeHtml(metricRules.labels.medium)} · &gt; ${lowRangeStart} to ${mediumRangeEnd} ms</span>
+    <span class="legend-item"><span class="dot red"></span>${escapeHtml(metricRules.labels.high)} · &gt; ${mediumRangeEnd} ms</span>
+  `;
+}
+
+function getRelativeAge(timestamp) {
+  if (!timestamp) return "";
+  const date = typeof timestamp === "string" ? new Date(timestamp) : timestamp;
+  if (isNaN(date.getTime())) return "";
+  const now = Date.now();
+  const diffSec = Math.floor((now - date.getTime()) / 1000);
+  if (diffSec < 0) return "Just now";
+  if (diffSec < 5) return "Just now";
+  if (diffSec < 60) return `${diffSec}s ago`;
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  return `${Math.floor(diffSec / 86400)}d ago`;
+}
+
+function updateStatusBanner() {
+  const banner = dom.statusBanner;
+  if (!banner) return;
+
+  const isStale = state.latestReport && (!state.isLiveScan || !state.liveRunning);
+  if (!isStale) {
+    banner.hidden = true;
+    return;
+  }
+
+  let projectName = "";
+  if (state.latestReport && state.latestReport.project) {
+    projectName = state.latestReport.project.name || "";
+  } else if (state.latestReport && state.latestReport.project_name) {
+    projectName = state.latestReport.project_name || "";
+  } else if (state.latestReport && state.latestReport.current_project) {
+    projectName = state.latestReport.current_project.name || "";
+  }
+
+  let relativeAge = "";
+  const timestamp = state.latestReport?.timestamp || state.lastScanTime;
+  if (timestamp) {
+    relativeAge = getRelativeAge(timestamp);
+  }
+
+  const parts = ["Cached scan"];
+  if (projectName) {
+    parts.push(projectName);
+  }
+  if (relativeAge) {
+    parts.push(relativeAge);
+  }
+  if (!state.liveRunning) {
+    parts.push("Live is closed");
+  }
+
+  banner.innerHTML = `<span class="dot"></span><span>${parts.join(" · ")}</span>`;
+  banner.hidden = false;
 }
 
 function updateScanTimestamp() {
@@ -772,18 +936,44 @@ function updateScanTimestamp() {
   }
 }
 
-function setTotalLatencySeverity(totalLatencyMs) {
+function setTotalLatencySeverity(totalLatencyMs, isStale = false) {
+  const badge = $("latencySeverityBadge");
   if (!hasNumericValue(totalLatencyMs)) {
     getDom().totalLatencyMs.style.color = "";
+    if (badge) {
+      badge.hidden = true;
+      badge.textContent = "";
+    }
     return false;
   }
 
-  const latencyClass = getLatencyClass(0, Number(totalLatencyMs));
+  if (isStale) {
+    getDom().totalLatencyMs.style.color = "var(--muted)";
+    if (badge) {
+      badge.hidden = true;
+      badge.textContent = "";
+    }
+    return true;
+  }
+
+  const latencyClass = getLatencyClass(0, Number(totalLatencyMs), "pdc");
+  const latencyLabel = getLatencyLabel(0, Number(totalLatencyMs), "pdc");
+
   getDom().totalLatencyMs.style.color = latencyClass === "high"
     ? "var(--red)"
     : latencyClass === "medium"
       ? "var(--amber)"
       : "var(--green)";
+
+  if (badge) {
+    badge.hidden = false;
+    badge.className = `severity-badge ${latencyClass}`;
+    badge.textContent = latencyClass === "high"
+      ? `${latencyLabel} Delay`
+      : latencyClass === "medium"
+        ? `${latencyLabel} Delay`
+        : `${latencyLabel} Delay`;
+  }
   return true;
 }
 
@@ -813,7 +1003,8 @@ function renderTrackDetails(instances, { nameLabel = "Track name", numberLabel =
 
 function updateDashboardStats(report) {
   const d = getDom();
-  const hasLatency = setTotalLatencySeverity(report.pdc_latency_ms);
+  const isStale = !state.isLiveScan || !state.liveRunning;
+  const hasLatency = setTotalLatencySeverity(report.pdc_latency_ms, isStale);
   if (hasLatency) {
     tweenText(d.totalLatencyMs, Number(report.pdc_latency_ms), fmtMs);
   } else {
@@ -825,21 +1016,53 @@ function updateDashboardStats(report) {
     ? `${fmtMs(report.cumulative_latency_ms)} ms cumulative`
     : "Cumulative latency unavailable";
   const bottleneck = report.bottleneck_track;
-  d.bottleneckTrack.textContent = bottleneck
-    ? `${bottleneck.track_name} · ${bottleneck.device_count} device${bottleneck.device_count === 1 ? "" : "s"}`
-    : "No PDC bottleneck";
+  if (bottleneck) {
+    const trackIndexStr = bottleneck.track_index !== undefined && bottleneck.track_index !== null ? ` data-track-index="${bottleneck.track_index}"` : "";
+    d.bottleneckTrack.innerHTML = `${escapeHtml(bottleneck.track_name)} · ${bottleneck.device_count} device${bottleneck.device_count === 1 ? "" : "s"} <button class="highlight-action-link" ${trackIndexStr} data-track-name="${escapeHtml(bottleneck.track_name)}" aria-label="Highlight bottleneck track in report">Highlight in report</button>`;
+  } else {
+    d.bottleneckTrack.textContent = "No PDC bottleneck";
+  }
+  const bufferBadge = $("bufferSeverityBadge");
   if (hasNumericValue(report.buffer_size)) {
     tweenText(d.bufferSize, Number(report.buffer_size), (n) => String(Math.round(n)));
+    if (isStale) {
+      d.bufferSize.style.color = "var(--muted)";
+      if (bufferBadge) {
+        bufferBadge.hidden = true;
+        bufferBadge.textContent = "";
+      }
+    } else {
+      const bufferVal = Number(report.buffer_size);
+      const bufferClass = getLatencyClass(bufferVal, 0, "buffer");
+      const bufferLabel = getLatencyLabel(bufferVal, 0, "buffer");
+
+      d.bufferSize.style.color = bufferClass === "high"
+        ? "var(--red)"
+        : bufferClass === "medium"
+          ? "var(--amber)"
+          : "var(--green)";
+
+      if (bufferBadge) {
+        bufferBadge.hidden = false;
+        bufferBadge.className = `severity-badge ${bufferClass}`;
+        bufferBadge.textContent = bufferLabel;
+      }
+    }
   } else {
     d.bufferSize.textContent = "--";
+    d.bufferSize.style.color = "";
+    if (bufferBadge) {
+      bufferBadge.hidden = true;
+      bufferBadge.textContent = "";
+    }
   }
   if (hasNumericValue(report.sample_rate)) {
     tweenText(d.sampleRate, Number(report.sample_rate) / 1000, (n) => (n ? `${n.toFixed(1)}k` : "--"));
   } else {
     d.sampleRate.textContent = "--";
   }
-  tweenText(d.trackCount, Number(report.track_count || 0), (n) => String(Math.round(n)));
-  tweenText(d.totalDevices, Number(report.device_count || 0), (n) => String(Math.round(n)));
+  tweenText(d.trackCount, Number(report.track_count || 0), (n) => pluralize(Math.round(n), "track"));
+  tweenText(d.totalDevices, Number(report.device_count || 0), (n) => pluralize(Math.round(n), "device"));
 
   const anyValueVisible = hasLatency || hasNumericValue(report.buffer_size) || hasNumericValue(report.sample_rate);
   if (anyValueVisible) {
@@ -850,16 +1073,140 @@ function updateDashboardStats(report) {
   }
 }
 
+function getRecommendationIconSvg(type) {
+  if (type === "recording") {
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg>`;
+  }
+  if (type === "performing") {
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
+  }
+  if (type === "mixing") {
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="2" y1="14" x2="6" y2="14"/><line x1="10" y1="8" x2="14" y2="8"/><line x1="18" y1="16" x2="22" y2="16"/></svg>`;
+  }
+  if (type === "bottleneck") {
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>`;
+}
+
 function renderRecommendations(report) {
   const panel = getDom().recommendations;
   const list = panel.querySelector(".recommendations-list");
-  const recommendations = report.recommendations || [];
-  panel.hidden = recommendations.length === 0;
-  list.innerHTML = recommendations.map((item) => `
-    <article class="recommendation-card">
-      <h3>${escapeHtml(item.title)}</h3>
-      <p>${escapeHtml(item.message)}</p>
-    </article>`).join("");
+
+  const mode = state.workflowMode || "recording";
+  const adapted = [];
+
+  // Prepend Mode-specific guidance card
+  if (mode === "recording") {
+    adapted.push({
+      type: "recording",
+      title: "Recording Guidance",
+      iconClass: "bump",
+      message: `
+        <div class="guidance-assumption"><strong>Assumed Context:</strong> Tracking live audio or MIDI inputs. <em>(Note: LatencyManager cannot read track monitoring or arm states.)</em></div>
+        <ul class="guidance-list">
+          <li><strong>Buffer Size:</strong> Set your audio buffer size low (e.g. 64 or 128 samples) to minimize roundtrip monitoring latency. Increase it only if you hear CPU dropouts or crackles.</li>
+          <li><strong>Direct Monitoring:</strong> Use your audio interface's 'Direct Monitoring' feature if possible to hear inputs with zero latency, bypassing Live's routing entirely.</li>
+          <li><strong>Reduced Latency When Monitoring:</strong> Ensure Options &rarr; 'Reduced Latency When Monitoring' is enabled to bypass latency-inducing plugins on monitored/armed tracks.</li>
+          <li><strong>Live 12 Keep Latency:</strong> In Live 12, check 'Keep Latency' in the track's context menu: disable it to align recorded clips with the grid, or enable it to preserve the physical timing of your performance.</li>
+        </ul>
+      `,
+      isHtml: true
+    });
+  } else if (mode === "performing") {
+    adapted.push({
+      type: "performing",
+      title: "Performing Guidance",
+      iconClass: "warn",
+      message: `
+        <div class="guidance-assumption"><strong>Assumed Context:</strong> Playing live instruments or triggering software instruments. <em>(Note: LatencyManager cannot read track routing or monitor states.)</em></div>
+        <ul class="guidance-list">
+          <li><strong>Monitored Signal Path:</strong> Prioritize minimizing latency on your active monitored signal path. Avoid using high-latency devices (e.g., lookahead limiters, linear phase EQs) on any track in your live performance routing.</li>
+          <li><strong>Return/Main Timing:</strong> Return tracks and the Main (Master) track are not latency-compensated in real-time for monitored signal paths. Keep the Main track and Return tracks free of latency-inducing plugins during your performance to prevent timing drift.</li>
+        </ul>
+      `,
+      isHtml: true
+    });
+  } else if (mode === "mixing") {
+    adapted.push({
+      type: "mixing",
+      title: "Mixing Guidance",
+      iconClass: "alert",
+      message: `
+        <div class="guidance-assumption"><strong>Assumed Context:</strong> Mixing, arranging, or mastering where real-time monitoring is not active. <em>(Note: LatencyManager cannot read track routing or monitor states.)</em></div>
+        <ul class="guidance-list">
+          <li><strong>PDC Bottlenecks:</strong> Prioritize resolving PDC bottlenecks. Heavy or high-latency plugins on any group or the Master track will delay the entire set to maintain sync.</li>
+          <li><strong>High-Latency Processing:</strong> Increase your audio buffer size (e.g., 512 or 1024 samples) to give your CPU maximum headroom for heavy plugins.</li>
+          <li><strong>Freeze and Flatten:</strong> Freeze and flatten tracks with high-latency plugins to print their audio and reduce the overall PDC bottleneck.</li>
+        </ul>
+      `,
+      isHtml: true
+    });
+  }
+
+  // Map and adapt backend recommendations
+  const backendRecs = report.recommendations || [];
+  backendRecs.forEach((item) => {
+    let title = item.title;
+    let message = item.message;
+
+    if (item.type === "bottleneck") {
+      if (mode === "recording") {
+        title = "PDC Bottleneck (Impacts Recording)";
+        message = item.message + " (Note: If this bottleneck track is not in your monitored recording path, enable 'Reduced Latency When Monitoring' so it doesn't affect your recording latency.)";
+      } else if (mode === "performing") {
+        title = "PDC Bottleneck (Impacts Performance)";
+        message = item.message + " (Note: High-latency plugins on Return/Main tracks will delay all tracks. If this bottleneck is on a Return or Main track, remove it to restore responsiveness.)";
+      } else if (mode === "mixing") {
+        title = "PDC Bottleneck (Primary Mixing Target)";
+        message = item.message + " (Use Freeze and Flatten on this track to free up CPU and align timing.)";
+      }
+    }
+
+    adapted.push({
+      type: item.type,
+      title: title,
+      message: message,
+      iconClass: item.type === "bottleneck" ? "alert" : "warn",
+      track_index: item.track_index,
+      track_name: item.track_name,
+      plugin_names: item.plugin_names,
+      isHtml: false
+    });
+  });
+
+  panel.hidden = adapted.length === 0;
+
+  list.innerHTML = adapted.map((item) => {
+    let actionBtn = "";
+    if (item.track_index !== undefined || item.track_name || (item.plugin_names && item.plugin_names.length)) {
+      const targetAttrs = [];
+      if (item.track_index !== undefined && item.track_index !== null) {
+        targetAttrs.push(`data-track-index="${item.track_index}"`);
+      }
+      if (item.track_name) {
+        targetAttrs.push(`data-track-name="${escapeHtml(item.track_name)}"`);
+      }
+      if (item.plugin_names) {
+        targetAttrs.push(`data-plugin-names="${escapeHtml(JSON.stringify(item.plugin_names))}"`);
+      }
+      actionBtn = `<button class="highlight-action-link" ${targetAttrs.join(" ")} type="button">Highlight in report</button>`;
+    }
+
+    const messageContent = item.isHtml ? item.message : escapeHtml(item.message).replace(/\n/g, "<br>");
+
+    return `
+    <article class="recommendation-card" data-type="${escapeHtml(item.type)}">
+      <div class="recommendation-card-header">
+        <div class="recommendation-icon ${item.iconClass || 'bump'}">
+          ${getRecommendationIconSvg(item.type)}
+        </div>
+        <h3>${escapeHtml(item.title)}</h3>
+      </div>
+      <div class="recommendation-text">${messageContent}</div>
+      ${actionBtn ? `<div class="recommendation-actions">${actionBtn}</div>` : ""}
+    </article>`;
+  }).join("");
 }
 
 function createPluginRow(item, maxSessionSamples) {
@@ -872,13 +1219,16 @@ function createPluginRow(item, maxSessionSamples) {
 }
 
 function updatePluginRow(row, item, maxSessionSamples) {
-  const latencyClass = getLatencyClass(item.latency_samples, item.latency_ms);
+  const type = state.groupMode === "channel" ? "pdc" : "device";
+  const latencyClass = getLatencyClass(item.latency_samples, item.latency_ms, type);
+  const latencyLabel = getLatencyLabel(item.latency_samples, item.latency_ms, type);
   const widthPercent = Math.max((item.latency_samples / maxSessionSamples) * 100, 2);
   const nameEl = row.querySelector(".plugin-name");
   const tracksEl = row.querySelector(".plugin-tracks");
   const barEl = row.querySelector(".latency-bar");
   const latencyEl = row.querySelector(".plugin-latency-val");
   const latencyNumberEl = row.querySelector(".latency-number");
+  const severityLabelEl = row.querySelector(".row-severity-label");
   const deltaEl = row.querySelector(".delta-badge");
   const detailsEl = row.querySelector(".track-details");
   const name = item.title || "Unnamed";
@@ -898,6 +1248,10 @@ function updatePluginRow(row, item, maxSessionSamples) {
   barEl.className = `latency-bar ${latencyClass}`;
   barEl.style.width = `${widthPercent}%`;
   latencyEl.className = `plugin-latency-val ${latencyClass}`;
+  if (severityLabelEl) {
+    severityLabelEl.textContent = latencyLabel;
+    severityLabelEl.className = `row-severity-label ${latencyClass}`;
+  }
   latencyNumberEl.textContent = fmtMs(item.latency_ms);
 
   if (deltaEl) {
@@ -1110,9 +1464,140 @@ function updateRowCount(shown, total) {
   }
 }
 
+function renderComparison(report) {
+  const comp = report?.comparison;
+  const panel = getDom().comparisonPanel;
+  if (!panel) return;
+
+  if (!state.compare || !comp) {
+    panel.hidden = true;
+    panel.innerHTML = "";
+    return;
+  }
+
+  panel.hidden = false;
+
+  // Build HTML
+  let html = `
+    <div class="comparison-summary-header">
+      <div>
+        <h3>Before / After Verification</h3>
+        <p class="comparison-item-meta" style="margin-top: 2px;">Comparison since last scan in this project</p>
+      </div>
+      <div class="comparison-badges">
+        <span class="comparison-badge ${comp.pdc_change_status}">
+          PDC: ${comp.pdc_change_label}
+        </span>
+        <span class="comparison-badge ${comp.bottleneck_status}">
+          Bottleneck: ${comp.bottleneck_message}
+        </span>
+      </div>
+    </div>
+    <div class="comparison-grid">
+  `;
+
+  // Added devices card
+  html += `
+    <div class="comparison-card-sub">
+      <h4>Added Devices</h4>
+  `;
+  if (comp.added_devices && comp.added_devices.length > 0) {
+    html += `<ul class="comparison-list">`;
+    comp.added_devices.forEach(d => {
+      html += `
+        <li class="comparison-item">
+          <span class="comparison-item-name" title="${escapeHtml(d.device_name)} on ${escapeHtml(d.track_name)}">
+            ${escapeHtml(d.device_name)} <span class="comparison-item-meta">(${escapeHtml(d.track_name)})</span>
+          </span>
+          <span class="comparison-item-delta plus">+${d.latency_ms.toFixed(1)} ms</span>
+        </li>
+      `;
+    });
+    html += `</ul>`;
+  } else {
+    html += `<p class="comparison-item-meta">None</p>`;
+  }
+  html += `</div>`;
+
+  // Removed devices card
+  html += `
+    <div class="comparison-card-sub">
+      <h4>Removed Devices</h4>
+  `;
+  if (comp.removed_devices && comp.removed_devices.length > 0) {
+    html += `<ul class="comparison-list">`;
+    comp.removed_devices.forEach(d => {
+      html += `
+        <li class="comparison-item">
+          <span class="comparison-item-name" title="${escapeHtml(d.device_name)} from ${escapeHtml(d.track_name)}">
+            ${escapeHtml(d.device_name)} <span class="comparison-item-meta">(${escapeHtml(d.track_name)})</span>
+          </span>
+          <span class="comparison-item-delta minus">-${d.latency_ms.toFixed(1)} ms</span>
+        </li>
+      `;
+    });
+    html += `</ul>`;
+  } else {
+    html += `<p class="comparison-item-meta">None</p>`;
+  }
+  html += `</div>`;
+
+  // Changed tracks & plugins card
+  html += `
+    <div class="comparison-card-sub">
+      <h4>Changed Tracks & Plugins</h4>
+  `;
+  const hasChanges = (comp.changed_tracks && comp.changed_tracks.length > 0) ||
+                      (comp.changed_plugins && comp.changed_plugins.length > 0);
+
+  if (hasChanges) {
+    html += `<ul class="comparison-list">`;
+    if (comp.changed_tracks) {
+      comp.changed_tracks.forEach(t => {
+        const delta = t.new_latency_ms - t.old_latency_ms;
+        const sign = delta > 0 ? "+" : "";
+        const cls = delta > 0 ? "plus" : "minus";
+        html += `
+          <li class="comparison-item">
+            <span class="comparison-item-name" title="Track: ${escapeHtml(t.track_name)}">
+              Track: ${escapeHtml(t.track_name)}
+            </span>
+            <span class="comparison-item-delta ${cls}">${sign}${delta.toFixed(1)} ms</span>
+          </li>
+        `;
+      });
+    }
+    if (comp.changed_plugins) {
+      comp.changed_plugins.forEach(p => {
+        const delta = p.new_max_latency_ms - p.old_max_latency_ms;
+        const sign = delta > 0 ? "+" : "";
+        const cls = delta > 0 ? "plus" : "minus";
+        if (Math.abs(delta) > 0.05) {
+          html += `
+            <li class="comparison-item">
+              <span class="comparison-item-name" title="Plugin: ${escapeHtml(p.device_name)}">
+                Plugin: ${escapeHtml(p.device_name)}
+              </span>
+              <span class="comparison-item-delta ${cls}">${sign}${delta.toFixed(1)} ms</span>
+            </li>
+          `;
+        }
+      });
+    }
+    html += `</ul>`;
+  } else {
+    html += `<p class="comparison-item-meta">None</p>`;
+  }
+  html += `</div>`;
+
+  html += `</div>`;
+  panel.innerHTML = html;
+}
+
 // ── Results rendering ──
 
 function updateResults(report) {
+  renderComparison(report);
   const total = totalRowCount(report);
   const rows = currentRows(report);
   const rowKeys = rows.map((row) => row.key).join("\n");
@@ -1245,6 +1730,8 @@ function renderReport(report) {
   updateResults(report);
   state.hasReport = true;
   getDom().reportToolbar.hidden = false;
+  updateStatusBanner();
+  updateTroubleshooting();
 }
 
 // ── Export ──
@@ -1329,7 +1816,11 @@ function setGroupMode(mode) {
   d.byPluginToggle.setAttribute("aria-pressed", String(mode === "plugin"));
   d.searchInput.placeholder =
     mode === "channel" ? "Filter by track or plug-in\u2026" : "Filter by plug-in name\u2026";
-  if (state.latestReport) updateResults(state.latestReport);
+  updateLegend();
+  if (state.latestReport) {
+    updateDashboardStats(state.latestReport);
+    updateResults(state.latestReport);
+  }
 }
 
 // ── Scan ──
@@ -1383,6 +1874,7 @@ async function scan({ showLoading = true } = {}) {
     state.currentBackoff = state.intervalSeconds;
     state.lastScanTime = new Date();
     updateScanTimestamp();
+    state.isLiveScan = true;
     renderReport(data);
   } catch (err) {
     if (err.name === "AbortError") {
@@ -1390,7 +1882,10 @@ async function scan({ showLoading = true } = {}) {
     }
     const payload = err.payload || {};
     if (payload.diagnostics) renderDiagnostics(payload.diagnostics);
-    if (payload.cached_report) renderReport(payload.cached_report);
+    if (payload.cached_report) {
+      state.isLiveScan = false;
+      renderReport(payload.cached_report);
+    }
     const preserveResults = state.hasReport || Boolean(payload.cached_report);
     setStatus(payload.connection_state || "scan_failed");
     state.consecutiveFailures++;
@@ -1442,8 +1937,309 @@ function rescheduleAutoRefresh() {
   if (state.autoRefresh) startAutoRefresh();
 }
 
+function highlightRowInReport(target) {
+  if (!state.latestReport) return;
+
+  // 1. Switch to Scan view if necessary
+  if (state.currentView !== "scan") {
+    setAppView("scan");
+  }
+
+  const hasTrack = target.trackIndex !== undefined || target.trackName;
+  const hasPlugins = target.pluginNames && target.pluginNames.length > 0;
+
+  let keyToHighlight = null;
+
+  if (hasTrack) {
+    // Ensure we are in "channel" view.
+    setGroupMode("channel");
+
+    const report = state.latestReport;
+    const rows = channelRows(report);
+
+    let targetRow = null;
+    if (target.trackIndex !== undefined) {
+      targetRow = rows.find(r => String(r.instances?.[0]?.track_index) === String(target.trackIndex));
+    }
+    if (!targetRow && target.trackName) {
+      targetRow = rows.find(r => r.title && r.title.toLowerCase().includes(target.trackName.toLowerCase()));
+    }
+
+    if (targetRow) {
+      keyToHighlight = targetRow.key;
+    }
+  } else if (hasPlugins) {
+    // Ensure we are in "plugin" view.
+    setGroupMode("plugin");
+
+    const report = state.latestReport;
+    const rows = pluginRows(report);
+
+    let targetRow = null;
+    for (const pName of target.pluginNames) {
+      const targetKey = pluginKey({ device_name: pName });
+      targetRow = rows.find(r => r.key === `plugin:${targetKey}`);
+      if (targetRow) break;
+    }
+
+    if (targetRow) {
+      keyToHighlight = targetRow.key;
+    }
+  }
+
+  if (!keyToHighlight) return;
+
+  // 2. Reveal hidden rows if target is outside top-10 view or filtered out.
+  let activeRows = currentRows(state.latestReport);
+  let isPresent = activeRows.some(r => r.key === keyToHighlight);
+
+  let changed = false;
+  if (!isPresent) {
+    const d = getDom();
+    if (state.searchQuery) {
+      state.searchQuery = "";
+      d.searchInput.value = "";
+      changed = true;
+    }
+
+    if (!state.showAll) {
+      state.showAll = true;
+      d.showAllToggle.checked = true;
+      changed = true;
+    }
+
+    if (changed) {
+      updateResults(state.latestReport);
+      activeRows = currentRows(state.latestReport);
+    }
+  }
+
+  const targetIndex = activeRows.findIndex(r => r.key === keyToHighlight);
+  if (targetIndex < 0) return;
+
+  // 3. Scroll the matching track or plugin row into view.
+  if (virtual.active) {
+    const y = rowY(targetIndex);
+    const rowHeight = (virtual.heightCache.get(targetIndex) || VIRTUAL_ROW_HEIGHT);
+    const clientHeight = dom.results.clientHeight;
+    dom.results.scrollTop = Math.max(0, y - (clientHeight - rowHeight) / 2);
+    renderVisibleRows();
+  }
+
+  const rowEl = dom.results.querySelector(`.plugin-row[data-key="${CSS.escape(keyToHighlight)}"]`);
+  if (!rowEl) return;
+
+  if (!virtual.active) {
+    rowEl.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+
+  // 4. Apply a brief accessible highlight
+  rowEl.classList.remove("highlight-flash");
+  rowEl.offsetHeight; // force reflow
+  rowEl.classList.add("highlight-flash");
+
+  setTimeout(() => {
+    rowEl.classList.remove("highlight-flash");
+  }, 1500);
+
+  // 5. Move keyboard focus to the row
+  const focusable = rowEl.querySelector(".plugin-toggle") || rowEl;
+  if (focusable) {
+    focusable.focus();
+  }
+}
+
+function updateTroubleshooting() {
+  const d = getDom();
+  if (!d.troubleshootingContent) return;
+
+  const report = state.latestReport;
+  const symptom = state.activeSymptom;
+
+  if (!symptom) {
+    d.troubleshootingWelcome.hidden = false;
+    d.troubleshootingPath.hidden = true;
+    return;
+  }
+
+  d.troubleshootingWelcome.hidden = true;
+  d.troubleshootingPath.hidden = false;
+
+  let html = "";
+  const formatLink = (text, url) => `<a href="${url}" target="_blank" rel="noopener" class="step-link">${text}</a>`;
+
+  if (symptom === "delay") {
+    const hasBuffer = report && hasNumericValue(report.buffer_size) && Number(report.buffer_size) > 0;
+    const hasPdc = report && hasNumericValue(report.pdc_latency_ms);
+    const bottleneck = report?.bottleneck_track;
+
+    html = `
+      <h3 class="symptom-title">Troubleshooting: Delay while playing or singing</h3>
+      <div class="symptom-steps">
+        <div class="symptom-step">
+          <div class="step-number-bubble">1</div>
+          <div class="step-content">
+            <h4 class="step-title">Configure Live's Monitor settings (Monitoring Latency)</h4>
+            <p class="step-desc">For the lowest latency when recording vocals or instruments, turn the track's Monitor setting to <strong>Off</strong> and use your audio interface's direct hardware monitoring. If you must monitor through Live to hear software effects, set the Monitor to <strong>Auto</strong> or <strong>In</strong>, but keep your plugin latency minimal.</p>
+            <div class="step-links">${formatLink("How to use Direct Monitoring", "https://help.ableton.com/hc/en-us/articles/360000843400-How-to-use-Direct-monitoring")}</div>
+          </div>
+        </div>
+
+        <div class="symptom-step">
+          <div class="step-number-bubble">2</div>
+          <div class="step-content">
+            <h4 class="step-title">Reduce interface audio buffer size (Interface Latency)</h4>
+            <p class="step-desc">Lowering the buffer size in Live's Audio Settings reduces the time it takes for audio to pass through the computer.</p>
+            ${hasBuffer ? `<div class="step-info">Detected current buffer size: <strong>${Math.round(report.buffer_size)} samples</strong>.</div>` : ""}
+            <div class="step-warning"><strong>Caution:</strong> Lowering the buffer size increases CPU load. If the buffer is set too low for your CPU, it may cause audio crackles, pops, or dropouts.</div>
+            <div class="step-links">${formatLink("How to reduce latency in Live", "https://help.ableton.com/hc/en-us/articles/209072289-How-to-reduce-latency-in-Live")}</div>
+          </div>
+        </div>
+
+        <div class="symptom-step">
+          <div class="step-number-bubble">3</div>
+          <div class="step-content">
+            <h4 class="step-title">Minimize Plugin Delay Compensation (PDC Latency)</h4>
+            <p class="step-desc">Live delays tracks to align them. Look-ahead or oversampling plugins on the monitoring track or Master track add to the monitoring delay.</p>
+            ${hasPdc ? `
+              <div class="step-info">
+                Detected PDC Latency: <strong>${fmtMs(report.pdc_latency_ms)} ms</strong>
+                ${bottleneck ? ` · Bottleneck Track: <strong>${escapeHtml(bottleneck.track_name)}</strong>` : ""}
+              </div>
+            ` : ""}
+            <div class="step-links">${formatLink("Read Plugin Delay Compensation (PDC) FAQ", "https://help.ableton.com/hc/en-us/articles/360001820360-Plugin-Delay-Compensation-FAQ")}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  } else if (symptom === "late") {
+    const hasPdc = report && hasNumericValue(report.pdc_latency_ms);
+
+    html = `
+      <h3 class="symptom-title">Troubleshooting: Recorded audio lands late</h3>
+      <div class="symptom-steps">
+        <div class="symptom-step">
+          <div class="step-number-bubble">1</div>
+          <div class="step-content">
+            <h4 class="step-title">Configure Driver Error Compensation (DEC) (Recording Placement)</h4>
+            <p class="step-desc">If newly recorded audio is consistently offset from the grid relative to MIDI or other tracks, adjust the <strong>Driver Error Compensation (DEC)</strong> slider in Live's Audio Settings.</p>
+            <div class="step-warning"><strong>Important:</strong> Driver Error Compensation specifically corrects the timeline placement of recorded audio. It does <strong>not</strong> affect general playback latency or real-time monitoring delay.</div>
+            <p class="step-desc">To configure DEC: Open Help &rarr; Help View &rarr; Audio I/O inside Live, and complete the Driver Error Compensation lesson.</p>
+            <div class="step-links">${formatLink("How to use Driver Error Compensation", "https://help.ableton.com/hc/en-us/articles/209072329-How-to-use-Driver-Error-Compensation")}</div>
+          </div>
+        </div>
+
+        <div class="symptom-step">
+          <div class="step-number-bubble">2</div>
+          <div class="step-content">
+            <h4 class="step-title">Minimize Plugin Delay Compensation (PDC Latency)</h4>
+            <p class="step-desc">High-latency plugins in your project can offset the timeline sync. Freeze or deactivate high-latency plugins while recording to ensure tighter recorded placement.</p>
+            ${hasPdc ? `<div class="step-info">Detected PDC Latency: <strong>${fmtMs(report.pdc_latency_ms)} ms</strong>.</div>` : ""}
+            <div class="step-links">${formatLink("Read Plugin Delay Compensation (PDC) FAQ", "https://help.ableton.com/hc/en-us/articles/360001820360-Plugin-Delay-Compensation-FAQ")}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  } else if (symptom === "sluggish") {
+    const hasBuffer = report && hasNumericValue(report.buffer_size) && Number(report.buffer_size) > 0;
+    const hasPdc = report && hasNumericValue(report.pdc_latency_ms);
+    const bottleneck = report?.bottleneck_track;
+
+    html = `
+      <h3 class="symptom-title">Troubleshooting: Playback feels sluggish</h3>
+      <div class="symptom-steps">
+        <div class="symptom-step">
+          <div class="step-number-bubble">1</div>
+          <div class="step-content">
+            <h4 class="step-title">Identify and remove Plugin Delay Compensation (PDC) bottlenecks</h4>
+            <p class="step-desc">Sluggish playback start/stop response and MIDI key trigger lag are caused by high-latency plugins. Live delays all tracks to synchronize them with the highest-latency path.</p>
+            ${hasPdc ? `
+              <div class="step-info">
+                Detected PDC Latency: <strong>${fmtMs(report.pdc_latency_ms)} ms</strong>
+                ${bottleneck ? ` · Driven by track: <strong>${escapeHtml(bottleneck.track_name)}</strong>` : ""}
+              </div>
+            ` : ""}
+            <p class="step-desc">Action: Freeze the bottleneck tracks, or deactivate/remove the offending plugins.</p>
+            <div class="step-links">${formatLink("Read Plugin Delay Compensation (PDC) FAQ", "https://help.ableton.com/hc/en-us/articles/360001820360-Plugin-Delay-Compensation-FAQ")}</div>
+          </div>
+        </div>
+
+        <div class="symptom-step">
+          <div class="step-number-bubble">2</div>
+          <div class="step-content">
+            <h4 class="step-title">Adjust interface audio buffer size (Interface Latency)</h4>
+            <p class="step-desc">A higher buffer size adds latency to general playback, note triggering, and transport controls.</p>
+            ${hasBuffer ? `<div class="step-info">Detected current buffer size: <strong>${Math.round(report.buffer_size)} samples</strong>.</div>` : ""}
+            <div class="step-warning"><strong>Caution:</strong> Lowering the buffer size reduces sluggishness but increases CPU load, risking audio crackles or dropouts.</div>
+            <div class="step-links">${formatLink("Audio buffer size settings", "https://help.ableton.com/hc/en-us/articles/209072289-How-to-reduce-latency-in-Live")}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  } else if (symptom === "crackles") {
+    const hasBuffer = report && hasNumericValue(report.buffer_size) && Number(report.buffer_size) > 0;
+    const hasDevices = report && (hasNumericValue(report.device_count) || hasNumericValue(report.track_count));
+
+    html = `
+      <h3 class="symptom-title">Troubleshooting: Crackles or dropouts</h3>
+      <div class="symptom-steps">
+        <div class="symptom-step">
+          <div class="step-number-bubble">1</div>
+          <div class="step-content">
+            <h4 class="step-title">Increase interface audio buffer size (CPU Buffer)</h4>
+            <p class="step-desc">Pops, clicks, and dropouts occur when the CPU cannot process the audio buffer fast enough. Increasing the buffer size gives the CPU more time to process audio.</p>
+            ${hasBuffer ? `<div class="step-info">Detected current buffer size: <strong>${Math.round(report.buffer_size)} samples</strong>.</div>` : ""}
+            <p class="step-desc">Action: Raise the buffer size (e.g., to 256, 512, or 1024 samples) during mixing or when using resource-intensive plugins.</p>
+            <div class="step-links">${formatLink("Optimizing CPU load in Live", "https://help.ableton.com/hc/en-us/articles/209071469-Optimizing-Live-s-CPU-performance")}</div>
+          </div>
+        </div>
+
+        <div class="symptom-step">
+          <div class="step-number-bubble">2</div>
+          <div class="step-content">
+            <h4 class="step-title">Freeze and Flatten heavy tracks</h4>
+            <p class="step-desc">Freezing converts MIDI and plugin tracks into pre-rendered audio, disabling CPU-heavy plugins and freeing resources.</p>
+            ${hasDevices ? `<div class="step-info">Detected: <strong>${report.device_count || 0} devices</strong> across <strong>${report.track_count || 0} tracks</strong>.</div>` : ""}
+            <div class="step-links">${formatLink("How to use Freeze and Flatten", "https://help.ableton.com/hc/en-us/articles/209771385-How-to-use-Freeze-and-Flatten")}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  d.troubleshootingContent.innerHTML = html;
+}
+
 function bindDeferredEvents() {
   const d = getDom();
+
+  const handleHighlightClick = (e) => {
+    const btn = e.target.closest(".highlight-action-link");
+    if (!btn) return;
+
+    e.preventDefault();
+    const trackIndex = btn.dataset.trackIndex !== undefined && btn.dataset.trackIndex !== "" ? parseInt(btn.dataset.trackIndex, 10) : undefined;
+    const trackName = btn.dataset.trackName || undefined;
+
+    let pluginNames = undefined;
+    if (btn.dataset.pluginNames) {
+      try {
+        pluginNames = JSON.parse(btn.dataset.pluginNames);
+      } catch (err) {
+        console.error("Failed to parse plugin names", err);
+      }
+    }
+
+    highlightRowInReport({ trackIndex, trackName, pluginNames });
+  };
+
+  if (d.recommendations) {
+    d.recommendations.addEventListener("click", handleHighlightClick);
+  }
+
+  if (d.bottleneckTrack) {
+    d.bottleneckTrack.addEventListener("click", handleHighlightClick);
+  }
 
   d.autoRefreshToggle.addEventListener("change", () => {
     state.autoRefresh = d.autoRefreshToggle.checked;
@@ -1521,6 +2317,62 @@ function bindDeferredEvents() {
 
   d.exportJson.addEventListener("click", exportJson);
   d.exportCsv.addEventListener("click", exportCsv);
+
+  d.workflowSelector.addEventListener("click", (e) => {
+    const btn = e.target.closest(".workflow-btn");
+    if (!btn) return;
+    setWorkflowMode(btn.dataset.mode);
+  });
+
+  d.workflowSelector.addEventListener("keydown", (event) => {
+    const buttons = [...d.workflowSelector.querySelectorAll(".workflow-btn")];
+    const currentIndex = buttons.findIndex((btn) => btn.dataset.mode === state.workflowMode);
+    let nextIndex = currentIndex;
+
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextIndex = (currentIndex + 1 + buttons.length) % buttons.length;
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextIndex = (currentIndex - 1 + buttons.length) % buttons.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = buttons.length - 1;
+    } else if (event.key === " " || event.key === "Enter") {
+      const btn = event.target.closest(".workflow-btn");
+      if (!btn) return;
+      event.preventDefault();
+      setWorkflowMode(btn.dataset.mode);
+      return;
+    } else {
+      return;
+    }
+
+    event.preventDefault();
+    const nextBtn = buttons[nextIndex];
+    nextBtn?.focus();
+    setWorkflowMode(nextBtn?.dataset.mode);
+  });
+
+  const bindSymptom = (id, symptom) => {
+    const btn = $(id);
+    if (btn) {
+      btn.addEventListener("click", () => {
+        state.activeSymptom = symptom;
+        updateTroubleshooting();
+      });
+    }
+  };
+  bindSymptom("symptom-delay", "delay");
+  bindSymptom("symptom-late", "late");
+  bindSymptom("symptom-sluggish", "sluggish");
+  bindSymptom("symptom-crackles", "crackles");
+
+  if (d.symptomBackBtn) {
+    d.symptomBackBtn.addEventListener("click", () => {
+      state.activeSymptom = null;
+      updateTroubleshooting();
+    });
+  }
 }
 
 function openIntervalDropdown() {
@@ -1679,8 +2531,12 @@ const onboarding = {
 
 const ONBOARDING_DISMISSED_KEY = "latency-onboarding-dismissed";
 const ONBOARDING_SESSION_DISMISSED_KEY = "latency-onboarding-dismissed-session";
+const ONBOARDING_COMPLETED_KEY = "latency-onboarding-completed";
 
-function showOnboarding() {
+let onboardingTriggerElement = null;
+
+function showOnboarding(triggerElement = null) {
+  onboardingTriggerElement = triggerElement;
   onboarding.overlay.hidden = false;
   onboarding.overlay.setAttribute("aria-modal", "true");
   const d = getDom();
@@ -1719,12 +2575,17 @@ function hideOnboarding(returnFocusTo) {
       }
     }
   }
-  const target = returnFocusTo || dom.scanButton || getFocusableElements(d.shell)[0];
+  const target = returnFocusTo || onboardingTriggerElement || dom.scanButton || getFocusableElements(d.shell)[0];
   target?.focus();
+  onboardingTriggerElement = null;
 }
 
 function isOnboardingDismissed() {
   return localStorage.getItem(ONBOARDING_DISMISSED_KEY) === "1" || sessionStorage.getItem(ONBOARDING_SESSION_DISMISSED_KEY) === "1";
+}
+
+function isOnboardingCompleted() {
+  return localStorage.getItem(ONBOARDING_COMPLETED_KEY) === "1";
 }
 
 function persistOnboardingDismissal() {
@@ -1776,6 +2637,7 @@ async function runOnboarding() {
     const { data: checks } = await api.request("/api/onboarding");
     applyOnboardingResults(checks);
     if (checks.all_passed) {
+      localStorage.setItem(ONBOARDING_COMPLETED_KEY, "1");
       persistOnboardingDismissal();
       setTimeout(() => {
         hideOnboarding(dom.scanButton);
@@ -1794,6 +2656,18 @@ onboarding.dismiss.addEventListener("click", () => {
   persistOnboardingDismissal();
   hideOnboarding();
 });
+
+const resetBtn = $("resetOnboardingBtn");
+if (resetBtn) {
+  resetBtn.addEventListener("click", () => {
+    localStorage.removeItem(ONBOARDING_DISMISSED_KEY);
+    sessionStorage.removeItem(ONBOARDING_SESSION_DISMISSED_KEY);
+    localStorage.removeItem(ONBOARDING_COMPLETED_KEY);
+    onboarding.doNotShow.checked = false;
+    showOnboarding(resetBtn);
+    runOnboarding();
+  });
+}
 
 function handleOnboardingKeydown(e) {
   if (onboarding.overlay.hidden) return;
@@ -1919,10 +2793,40 @@ document.querySelector(".app-nav").addEventListener("keydown", (event) => {
   setAppView(tabs[next].dataset.view);
 });
 
+function updateWorkflowSelectorUI() {
+  const selector = getDom().workflowSelector;
+  if (!selector) return;
+  const buttons = selector.querySelectorAll(".workflow-btn");
+  buttons.forEach((btn) => {
+    const isCurrent = btn.dataset.mode === state.workflowMode;
+    btn.classList.toggle("active", isCurrent);
+    btn.setAttribute("aria-checked", isCurrent ? "true" : "false");
+    btn.tabIndex = isCurrent ? 0 : -1;
+  });
+}
+
+function setWorkflowMode(mode) {
+  if (!WORKFLOW_MODES.includes(mode) || mode === state.workflowMode) return;
+  state.workflowMode = mode;
+  localStorage.setItem("latency_workflow_mode", mode);
+  updateWorkflowSelectorUI();
+  updateLegend();
+  if (state.latestReport) {
+    updateDashboardStats(state.latestReport);
+    renderRecommendations(state.latestReport);
+    updateResults(state.latestReport);
+  }
+}
+
 // ── Init ──
 
 async function init() {
+  const storedWorkflowMode = localStorage.getItem("latency_workflow_mode");
+  state.workflowMode = WORKFLOW_MODES.includes(storedWorkflowMode) ? storedWorkflowMode : "recording";
   bindDeferredEvents();
+  updateWorkflowSelectorUI();
+  updateLegend();
+  updateTroubleshooting();
   if (window.ResizeObserver) {
     new ResizeObserver(() => {
       virtual.viewportHeight = -1;
@@ -1934,7 +2838,7 @@ async function init() {
   updateScanTimestamp();
   setInterval(updateScanTimestamp, 10000);
 
-  if (isOnboardingDismissed()) {
+  if (isOnboardingDismissed() || isOnboardingCompleted()) {
     scan({ showLoading: true });
     return;
   }
@@ -1947,6 +2851,7 @@ async function init() {
   } catch {}
 
   if (checks?.all_passed) {
+    localStorage.setItem(ONBOARDING_COMPLETED_KEY, "1");
     persistOnboardingDismissal();
     scan({ showLoading: true });
   } else {
@@ -1959,4 +2864,20 @@ const scheduleInit = typeof requestIdleCallback === "function"
   ? (cb) => requestIdleCallback(cb, { timeout: 1000 })
   : (cb) => setTimeout(cb, 1);
 
-scheduleInit(() => init());
+// Always expose test hooks so test_onboarding.js can access module-level
+// identifiers. In production test_onboarding.js bails immediately via its own
+// window.location.search guard, so this object is never exercised.
+window.__onboardingTest = {
+  onboarding,
+  init,
+  scan,
+  getFocusableElements,
+  isOnboardingCompleted,
+  ONBOARDING_DISMISSED_KEY,
+  ONBOARDING_SESSION_DISMISSED_KEY,
+  ONBOARDING_COMPLETED_KEY,
+};
+
+if (!window.location.search.includes("test=1")) {
+  scheduleInit(() => init());
+}
