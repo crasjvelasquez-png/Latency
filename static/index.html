@@ -68,7 +68,7 @@
     <main id="main-content" class="app-main" tabindex="-1">
     <section id="panel-scan" class="app-section" data-view="scan" role="tabpanel" aria-labelledby="tab-scan">
       <div id="statusBanner" class="status-banner" hidden></div>
-      <div class="workflow-section">
+      <div class="workflow-section feature-hidden" aria-hidden="true">
         <span class="workflow-label">Workflow:</span>
         <div id="workflowSelector" class="workflow-selector" role="radiogroup" aria-label="Workflow mode">
           <button type="button" class="workflow-btn" data-mode="recording" role="radio" aria-checked="true">Recording</button>
@@ -115,7 +115,7 @@
 
     </section>
 
-    <section id="recommendations" class="recommendations-panel" aria-label="Recommendations" hidden>
+    <section id="recommendations" class="recommendations-panel feature-hidden" aria-label="Recommendations" aria-hidden="true" hidden>
       <div class="recommendations-header">
         <h2>Recommendations</h2>
         <p class="recommendations-subtitle">What you should do next to reduce latency</p>
@@ -125,7 +125,7 @@
       </div>
     </section>
 
-    <section class="diagnostics-panel troubleshooting-panel" aria-label="Troubleshooting">
+    <section class="diagnostics-panel troubleshooting-panel feature-hidden" aria-label="Troubleshooting" aria-hidden="true">
       <details id="troubleshootingDetails" open>
         <summary>
           <span>What are you experiencing?</span>
@@ -149,7 +149,7 @@
       </details>
     </section>
 
-    <section class="diagnostics-panel" aria-label="Diagnostics">
+    <section class="diagnostics-panel feature-hidden" aria-label="Diagnostics" aria-hidden="true">
       <details id="diagnosticsDetails">
         <summary>
           <span>Diagnostics</span>
@@ -298,7 +298,7 @@
           </div>
 
           <!-- Setting Card: Workflow Mode -->
-          <div class="settings-card">
+          <div class="settings-card feature-hidden" aria-hidden="true">
             <div class="settings-card-header">
               <div class="settings-card-info">
                 <h3>Default workflow mode</h3>

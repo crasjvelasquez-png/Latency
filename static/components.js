@@ -43,7 +43,6 @@
           <div class="plugin-latency-num-row">
             <span class="latency-number"></span> <span class="latency-unit">ms</span>
           </div>
-          <span class="row-severity-label"></span>
           <span class="delta-badge" hidden></span>
         </div>
         <button class="plugin-toggle" type="button" aria-label="Toggle details" aria-expanded="false">

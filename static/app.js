@@ -850,9 +850,9 @@ function updateLegend() {
   const mediumRangeEnd = typeof metricRules.mediumLimit === "number" ? metricRules.mediumLimit.toFixed(metricRules.mediumLimit % 1 ? 1 : 0) : metricRules.mediumLimit;
 
   container.innerHTML = `
-    <span class="legend-item"><span class="dot green"></span>${escapeHtml(metricRules.labels.low)} · &le; ${lowRangeStart} ms</span>
-    <span class="legend-item"><span class="dot yellow"></span>${escapeHtml(metricRules.labels.medium)} · &gt; ${lowRangeStart} to ${mediumRangeEnd} ms</span>
-    <span class="legend-item"><span class="dot red"></span>${escapeHtml(metricRules.labels.high)} · &gt; ${mediumRangeEnd} ms</span>
+    <span class="legend-item"><span class="dot green"></span>&le; ${lowRangeStart} ms</span>
+    <span class="legend-item"><span class="dot yellow"></span>&gt; ${lowRangeStart} to ${mediumRangeEnd} ms</span>
+    <span class="legend-item"><span class="dot red"></span>&gt; ${mediumRangeEnd} ms</span>
   `;
 }
 
@@ -957,8 +957,6 @@ function setTotalLatencySeverity(totalLatencyMs, isStale = false) {
   }
 
   const latencyClass = getLatencyClass(0, Number(totalLatencyMs), "pdc");
-  const latencyLabel = getLatencyLabel(0, Number(totalLatencyMs), "pdc");
-
   getDom().totalLatencyMs.style.color = latencyClass === "high"
     ? "var(--red)"
     : latencyClass === "medium"
@@ -966,13 +964,8 @@ function setTotalLatencySeverity(totalLatencyMs, isStale = false) {
       : "var(--green)";
 
   if (badge) {
-    badge.hidden = false;
-    badge.className = `severity-badge ${latencyClass}`;
-    badge.textContent = latencyClass === "high"
-      ? `${latencyLabel} Delay`
-      : latencyClass === "medium"
-        ? `${latencyLabel} Delay`
-        : `${latencyLabel} Delay`;
+    badge.hidden = true;
+    badge.textContent = "";
   }
   return true;
 }
@@ -1034,7 +1027,6 @@ function updateDashboardStats(report) {
     } else {
       const bufferVal = Number(report.buffer_size);
       const bufferClass = getLatencyClass(bufferVal, 0, "buffer");
-      const bufferLabel = getLatencyLabel(bufferVal, 0, "buffer");
 
       d.bufferSize.style.color = bufferClass === "high"
         ? "var(--red)"
@@ -1043,9 +1035,8 @@ function updateDashboardStats(report) {
           : "var(--green)";
 
       if (bufferBadge) {
-        bufferBadge.hidden = false;
-        bufferBadge.className = `severity-badge ${bufferClass}`;
-        bufferBadge.textContent = bufferLabel;
+        bufferBadge.hidden = true;
+        bufferBadge.textContent = "";
       }
     }
   } else {
@@ -1221,14 +1212,12 @@ function createPluginRow(item, maxSessionSamples) {
 function updatePluginRow(row, item, maxSessionSamples) {
   const type = state.groupMode === "channel" ? "pdc" : "device";
   const latencyClass = getLatencyClass(item.latency_samples, item.latency_ms, type);
-  const latencyLabel = getLatencyLabel(item.latency_samples, item.latency_ms, type);
   const widthPercent = Math.max((item.latency_samples / maxSessionSamples) * 100, 2);
   const nameEl = row.querySelector(".plugin-name");
   const tracksEl = row.querySelector(".plugin-tracks");
   const barEl = row.querySelector(".latency-bar");
   const latencyEl = row.querySelector(".plugin-latency-val");
   const latencyNumberEl = row.querySelector(".latency-number");
-  const severityLabelEl = row.querySelector(".row-severity-label");
   const deltaEl = row.querySelector(".delta-badge");
   const detailsEl = row.querySelector(".track-details");
   const name = item.title || "Unnamed";
@@ -1248,10 +1237,6 @@ function updatePluginRow(row, item, maxSessionSamples) {
   barEl.className = `latency-bar ${latencyClass}`;
   barEl.style.width = `${widthPercent}%`;
   latencyEl.className = `plugin-latency-val ${latencyClass}`;
-  if (severityLabelEl) {
-    severityLabelEl.textContent = latencyLabel;
-    severityLabelEl.className = `row-severity-label ${latencyClass}`;
-  }
   latencyNumberEl.textContent = fmtMs(item.latency_ms);
 
   if (deltaEl) {
