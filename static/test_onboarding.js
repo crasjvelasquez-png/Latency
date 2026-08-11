@@ -237,14 +237,13 @@
           "Modal should remain hidden on init when already completed"
         );
 
-        const resetBtn = document.getElementById("resetOnboardingBtn");
+        const resetBtn = document.getElementById("btnResetOnboarding");
         assert(resetBtn !== null, "Reset button must exist in the DOM");
 
         onboarding.doNotShow.checked = true; // should be cleared on reset
 
-        // Trigger the reset (the click handler passes resetBtn as the trigger,
-        // so focus will be restored to it after modal close regardless of
-        // whether the button itself was focused before the click)
+        // Trigger the reset from Settings. The handler closes Settings and
+        // passes the gear button as the focus-return target.
         resetBtn.click();
         await delay(150); // let runOnboarding settle (it's async)
 
@@ -279,11 +278,7 @@
           );
         }
 
-        // Verify that the modal was opened with resetBtn as the trigger so that
-        // focus will be restored to it when the modal closes in a real session.
-        // (We cannot assert document.activeElement === resetBtn here because
-        // the Help tab panel is hidden in the test environment and browsers
-        // refuse to focus elements inside hidden ancestors.)
+        // Verify that a focus-return target was recorded for the real session.
         const triggerEl = window.__onboardingTest._lastTrigger;
 
         // Dismiss via Escape key

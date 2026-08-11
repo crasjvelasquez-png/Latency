@@ -57,6 +57,14 @@ function getDom() {
     troubleshootingContent: $("troubleshootingContent"),
     symptomBackBtn: $("symptomBackBtn"),
     comparisonPanel: $("comparisonPanel"),
+    settingsButton: $("settingsButton"),
+    settingsModal: $("settingsModal"),
+    settingsCloseButton: $("settingsCloseButton"),
+    settingsAutoRefresh: $("settingsAutoRefresh"),
+    settingsRefreshInterval: $("settingsRefreshInterval"),
+    settingsGrouping: $("settingsGrouping"),
+    btnResetOnboarding: $("btnResetOnboarding"),
+    btnResetPreferences: $("btnResetPreferences"),
   };
   return _domDeferred;
 }
@@ -84,9 +92,6 @@ const state = {
   scanAbort: null,
   statusAbort: null,
   exportToastTimer: null,
-  currentView: "scan",
-  viewScrollPositions: new Map(),
-  transitioning: false,
   liveRunning: false,
   isLiveScan: false,
   workflowMode: "recording",
@@ -304,7 +309,6 @@ function refreshVirtualHeights() {
 
 const FLIP_DURATION = 200;
 const FLIP_EASING = "ease-out";
-const VIEW_TRANSITION_DURATION = 180;
 const reducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 function getRect(el) {
@@ -400,6 +404,122 @@ function getFocusableElements(container) {
       'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
     )
   ).filter((el) => !el.disabled && el.offsetParent !== null);
+}
+
+const PREFERENCES_KEY = "latency_preferences";
+const DEFAULT_PREFERENCES = Object.freeze({
+  autoRefresh: false,
+  intervalSeconds: 30,
+  groupMode: "channel",
+});
+const REFRESH_INTERVALS = [5, 10, 30, 60];
+
+function readPreferences() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || "{}");
+    return {
+      autoRefresh: typeof stored.autoRefresh === "boolean" ? stored.autoRefresh : DEFAULT_PREFERENCES.autoRefresh,
+      intervalSeconds: REFRESH_INTERVALS.includes(Number(stored.intervalSeconds))
+        ? Number(stored.intervalSeconds)
+        : DEFAULT_PREFERENCES.intervalSeconds,
+      groupMode: ["channel", "plugin"].includes(stored.groupMode)
+        ? stored.groupMode
+        : DEFAULT_PREFERENCES.groupMode,
+    };
+  } catch {
+    return { ...DEFAULT_PREFERENCES };
+  }
+}
+
+function savePreferences() {
+  try {
+    localStorage.setItem(PREFERENCES_KEY, JSON.stringify({
+      autoRefresh: state.autoRefresh,
+      intervalSeconds: state.intervalSeconds,
+      groupMode: state.groupMode,
+    }));
+  } catch {}
+}
+
+function syncPreferenceControls() {
+  const d = getDom();
+  d.autoRefreshToggle.checked = state.autoRefresh;
+  d.settingsAutoRefresh.checked = state.autoRefresh;
+  d.intervalTrigger.textContent = `${state.intervalSeconds}s`;
+  d.settingsRefreshInterval.value = String(state.intervalSeconds);
+  d.settingsGrouping.value = state.groupMode;
+  d.intervalDropdown.querySelectorAll(".interval-option").forEach((btn) => {
+    btn.classList.toggle("active", Number(btn.dataset.value) === state.intervalSeconds);
+  });
+}
+
+function applyPreferences(preferences, { persist = false } = {}) {
+  state.autoRefresh = preferences.autoRefresh;
+  state.intervalSeconds = preferences.intervalSeconds;
+  state.currentBackoff = preferences.intervalSeconds;
+  state.groupMode = preferences.groupMode;
+  syncPreferenceControls();
+  setGroupMode(preferences.groupMode);
+  if (persist) savePreferences();
+}
+
+function setAutoRefresh(enabled, { scanNow = false } = {}) {
+  state.autoRefresh = Boolean(enabled);
+  syncPreferenceControls();
+  savePreferences();
+  if (state.autoRefresh) {
+    if (scanNow) scan({ showLoading: false });
+    startAutoRefresh();
+  } else {
+    stopAutoRefresh();
+  }
+}
+
+function setRefreshInterval(seconds) {
+  const value = Number(seconds);
+  if (!REFRESH_INTERVALS.includes(value)) return;
+  state.intervalSeconds = value;
+  state.currentBackoff = value;
+  syncPreferenceControls();
+  savePreferences();
+  if (state.autoRefresh) rescheduleAutoRefresh();
+}
+
+function openSettings() {
+  const d = getDom();
+  syncPreferenceControls();
+  d.settingsModal.hidden = false;
+  d.settingsButton.setAttribute("aria-expanded", "true");
+  d.settingsCloseButton.focus();
+}
+
+function closeSettings({ restoreFocus = true } = {}) {
+  const d = getDom();
+  d.settingsModal.hidden = true;
+  d.settingsButton.setAttribute("aria-expanded", "false");
+  if (restoreFocus) d.settingsButton.focus();
+}
+
+function handleSettingsKeydown(event) {
+  const d = getDom();
+  if (d.settingsModal.hidden) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeSettings();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusables = getFocusableElements(d.settingsModal);
+  if (focusables.length === 0) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 // SYNC: Keep aliases and pluginKey() aligned with app.py normalize_plugin_name().
@@ -1792,7 +1912,7 @@ function exportCsv() {
 // ── Group mode ──
 
 function setGroupMode(mode) {
-  if (state.groupMode === mode) return;
+  const changed = state.groupMode !== mode;
   state.groupMode = mode;
   const d = getDom();
   d.byChannelToggle.classList.toggle("active", mode === "channel");
@@ -1802,7 +1922,7 @@ function setGroupMode(mode) {
   d.searchInput.placeholder =
     mode === "channel" ? "Filter by track or plug-in\u2026" : "Filter by plug-in name\u2026";
   updateLegend();
-  if (state.latestReport) {
+  if (changed && state.latestReport) {
     updateDashboardStats(state.latestReport);
     updateResults(state.latestReport);
   }
@@ -1922,13 +2042,13 @@ function rescheduleAutoRefresh() {
   if (state.autoRefresh) startAutoRefresh();
 }
 
+function beginInitialScan() {
+  scan({ showLoading: true });
+  if (state.autoRefresh) startAutoRefresh();
+}
+
 function highlightRowInReport(target) {
   if (!state.latestReport) return;
-
-  // 1. Switch to Scan view if necessary
-  if (state.currentView !== "scan") {
-    setAppView("scan");
-  }
 
   const hasTrack = target.trackIndex !== undefined || target.trackName;
   const hasPlugins = target.pluginNames && target.pluginNames.length > 0;
@@ -2227,13 +2347,7 @@ function bindDeferredEvents() {
   }
 
   d.autoRefreshToggle.addEventListener("change", () => {
-    state.autoRefresh = d.autoRefreshToggle.checked;
-    if (state.autoRefresh) {
-      scan({ showLoading: false });
-      startAutoRefresh();
-    } else {
-      stopAutoRefresh();
-    }
+    setAutoRefresh(d.autoRefreshToggle.checked, { scanNow: true });
   });
 
   d.intervalTrigger.addEventListener("click", (e) => {
@@ -2262,19 +2376,50 @@ function bindDeferredEvents() {
     const option = e.target.closest(".interval-option");
     if (!option) return;
     const val = parseInt(option.dataset.value, 10);
-    d.intervalDropdown.querySelectorAll(".interval-option").forEach((btn) => {
-      btn.classList.toggle("active", btn === option);
-    });
-    d.intervalTrigger.textContent = val + "s";
-    state.intervalSeconds = val;
-    state.currentBackoff = val;
+    setRefreshInterval(val);
     closeIntervalDropdown();
     d.intervalTrigger.focus();
-    if (state.autoRefresh) rescheduleAutoRefresh();
   });
 
-  d.byChannelToggle.addEventListener("click", () => setGroupMode("channel"));
-  d.byPluginToggle.addEventListener("click", () => setGroupMode("plugin"));
+  d.byChannelToggle.addEventListener("click", () => {
+    setGroupMode("channel");
+    syncPreferenceControls();
+    savePreferences();
+  });
+  d.byPluginToggle.addEventListener("click", () => {
+    setGroupMode("plugin");
+    syncPreferenceControls();
+    savePreferences();
+  });
+
+  d.settingsButton.addEventListener("click", openSettings);
+  d.settingsCloseButton.addEventListener("click", () => closeSettings());
+  d.settingsModal.addEventListener("click", (event) => {
+    if (event.target === d.settingsModal) closeSettings();
+  });
+  d.settingsModal.addEventListener("keydown", handleSettingsKeydown);
+  d.settingsAutoRefresh.addEventListener("change", () => {
+    setAutoRefresh(d.settingsAutoRefresh.checked, { scanNow: true });
+  });
+  d.settingsRefreshInterval.addEventListener("change", () => {
+    setRefreshInterval(d.settingsRefreshInterval.value);
+  });
+  d.settingsGrouping.addEventListener("change", () => {
+    setGroupMode(d.settingsGrouping.value);
+    syncPreferenceControls();
+    savePreferences();
+  });
+  d.btnResetPreferences.addEventListener("click", () => {
+    stopAutoRefresh();
+    try {
+      localStorage.removeItem(PREFERENCES_KEY);
+    } catch {}
+    applyPreferences({ ...DEFAULT_PREFERENCES });
+  });
+  d.btnResetOnboarding.addEventListener("click", () => {
+    closeSettings({ restoreFocus: false });
+    resetOnboardingPreference(d.settingsButton);
+  });
 
   let searchDebounce = null;
   d.searchInput.addEventListener("input", () => {
@@ -2626,7 +2771,7 @@ async function runOnboarding() {
       persistOnboardingDismissal();
       setTimeout(() => {
         hideOnboarding(dom.scanButton);
-        scan({ showLoading: true });
+        beginInitialScan();
       }, 600);
     }
   } catch {
@@ -2642,16 +2787,17 @@ onboarding.dismiss.addEventListener("click", () => {
   hideOnboarding();
 });
 
-const resetBtn = $("resetOnboardingBtn");
-if (resetBtn) {
-  resetBtn.addEventListener("click", () => {
-    localStorage.removeItem(ONBOARDING_DISMISSED_KEY);
-    sessionStorage.removeItem(ONBOARDING_SESSION_DISMISSED_KEY);
-    localStorage.removeItem(ONBOARDING_COMPLETED_KEY);
-    onboarding.doNotShow.checked = false;
-    showOnboarding(resetBtn);
-    runOnboarding();
-  });
+async function resetOnboardingPreference(triggerElement) {
+  localStorage.removeItem(ONBOARDING_DISMISSED_KEY);
+  sessionStorage.removeItem(ONBOARDING_SESSION_DISMISSED_KEY);
+  localStorage.removeItem(ONBOARDING_COMPLETED_KEY);
+  onboarding.doNotShow.checked = false;
+  showOnboarding(triggerElement);
+  await runOnboarding();
+
+  if (!onboarding.overlay.hidden) {
+    getFocusableElements(onboarding.overlay)[0]?.focus();
+  }
 }
 
 function handleOnboardingKeydown(e) {
@@ -2692,92 +2838,6 @@ onboarding.overlay.addEventListener("focusout", (e) => {
   }
 });
 
-// ── App Navigation ──
-
-function saveScrollPosition(view) {
-  state.viewScrollPositions.set(view, window.scrollY);
-}
-
-function restoreScrollPosition(view) {
-  const y = state.viewScrollPositions.get(view);
-  if (y !== undefined) {
-    window.scrollTo(0, y);
-  }
-}
-
-function setAppView(view) {
-  if (view === state.currentView || state.transitioning) return;
-
-  const prevView = state.currentView;
-  saveScrollPosition(prevView);
-
-  document.querySelectorAll(".app-nav-btn").forEach((btn) => {
-    const selected = btn.dataset.view === view;
-    btn.classList.toggle("active", selected);
-    btn.setAttribute("aria-selected", String(selected));
-  });
-
-  const prevSection = document.querySelector(`.app-section[data-view="${prevView}"]`);
-  const nextSection = document.querySelector(`.app-section[data-view="${view}"]`);
-
-  if (!prevSection || !nextSection) {
-    state.currentView = view;
-    document.querySelectorAll(".app-section").forEach((section) => {
-      section.hidden = section.dataset.view !== view;
-    });
-    restoreScrollPosition(view);
-    return;
-  }
-
-  state.transitioning = true;
-
-  prevSection.removeAttribute("hidden");
-  prevSection.classList.add("transitioning-out");
-
-  nextSection.removeAttribute("hidden");
-  nextSection.classList.add("transitioning-in");
-
-  const duration = reducedMotion ? 0 : VIEW_TRANSITION_DURATION;
-
-  const cleanup = () => {
-    prevSection.classList.remove("transitioning-out");
-    prevSection.hidden = true;
-    nextSection.classList.remove("transitioning-in");
-    state.transitioning = false;
-    state.currentView = view;
-    restoreScrollPosition(view);
-  };
-
-  if (duration === 0) {
-    cleanup();
-    return;
-  }
-
-  prevSection.addEventListener("animationend", cleanup, { once: true });
-  setTimeout(cleanup, duration + 50);
-}
-
-document.querySelector(".app-nav").addEventListener("click", (e) => {
-  const btn = e.target.closest(".app-nav-btn");
-  if (!btn) return;
-  setAppView(btn.dataset.view);
-});
-
-document.querySelector(".app-nav").addEventListener("keydown", (event) => {
-  const tabs = [...document.querySelectorAll(".app-nav-btn")];
-  const current = tabs.indexOf(event.target);
-  if (current < 0) return;
-  let next = current;
-  if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
-  else if (event.key === "ArrowLeft") next = (current - 1 + tabs.length) % tabs.length;
-  else if (event.key === "Home") next = 0;
-  else if (event.key === "End") next = tabs.length - 1;
-  else return;
-  event.preventDefault();
-  tabs[next].focus();
-  setAppView(tabs[next].dataset.view);
-});
-
 function updateWorkflowSelectorUI() {
   const selector = getDom().workflowSelector;
   if (!selector) return;
@@ -2806,6 +2866,7 @@ function setWorkflowMode(mode) {
 // ── Init ──
 
 async function init() {
+  applyPreferences(readPreferences());
   const storedWorkflowMode = localStorage.getItem("latency_workflow_mode");
   state.workflowMode = WORKFLOW_MODES.includes(storedWorkflowMode) ? storedWorkflowMode : "recording";
   bindDeferredEvents();
@@ -2824,7 +2885,7 @@ async function init() {
   setInterval(updateScanTimestamp, 10000);
 
   if (isOnboardingDismissed() || isOnboardingCompleted()) {
-    scan({ showLoading: true });
+    beginInitialScan();
     return;
   }
 
@@ -2838,7 +2899,7 @@ async function init() {
   if (checks?.all_passed) {
     localStorage.setItem(ONBOARDING_COMPLETED_KEY, "1");
     persistOnboardingDismissal();
-    scan({ showLoading: true });
+    beginInitialScan();
   } else {
     showOnboarding();
     if (!checks) runOnboarding();

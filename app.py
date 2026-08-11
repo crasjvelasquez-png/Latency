@@ -1448,6 +1448,13 @@ class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
 
+    def end_headers(self):
+        # This is a local desktop UI. Never let WebKit keep an older frontend
+        # after the application bundle has been replaced.
+        if not any(header.lower().startswith(b"cache-control:") for header in self._headers_buffer):
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def log_message(self, format, *args):
         logger.info("%s - %s", self.address_string(), format % args)
 

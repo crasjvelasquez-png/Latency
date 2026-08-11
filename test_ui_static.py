@@ -34,7 +34,12 @@ def _parse_index():
 def test_static_scripts_load_architecture_helpers_before_app():
     parser = _parse_index()
 
-    assert parser.scripts[-4:] == ["/api.js", "/components.js", "/app.js", "/test_onboarding.js"]
+    assert [src.split("?", 1)[0] for src in parser.scripts[-4:]] == [
+        "/api.js",
+        "/components.js",
+        "/app.js",
+        "/test_onboarding.js",
+    ]
 
 
 def test_static_ui_keeps_actions_delegated():
@@ -48,6 +53,37 @@ def test_app_dom_bindings_exist_in_html():
     required_ids = set(re.findall(r'\$\("([^"]+)"\)', APP_JS.read_text()))
 
     assert required_ids <= parser.ids
+
+
+def test_scan_is_default_and_settings_opens_as_modal():
+    html = INDEX_HTML.read_text()
+    parser = _parse_index()
+
+    assert 'id="panel-scan"' in html
+    assert 'class="app-nav"' not in html
+    assert "tab-scan" not in parser.ids
+    assert "tab-history" not in parser.ids
+    assert "tab-help" not in parser.ids
+    assert "panel-history" not in parser.ids
+    assert "panel-help" not in parser.ids
+    assert "tab-settings" not in parser.ids
+    assert "panel-settings" not in parser.ids
+    assert "settingsButton" in parser.ids
+    assert "settingsModal" in parser.ids
+    assert 'id="settingsModal" class="modal settings-modal" role="dialog"' in html
+
+
+def test_settings_modal_is_wired_and_preferences_persist():
+    js_content = APP_JS.read_text()
+
+    assert 'd.settingsButton.addEventListener("click", openSettings)' in js_content
+    assert 'd.settingsCloseButton.addEventListener("click"' in js_content
+    assert "handleSettingsKeydown" in js_content
+    assert 'const PREFERENCES_KEY = "latency_preferences"' in js_content
+    assert "savePreferences()" in js_content
+    assert "settingsAutoRefresh" in js_content
+    assert "settingsRefreshInterval" in js_content
+    assert "settingsGrouping" in js_content
 
 
 class WorkflowHtmlParser(HTMLParser):

@@ -77,6 +77,12 @@ def api_server():
         server.server_close()
 
 
+def test_static_assets_disable_browser_cache(api_server):
+    url = f"http://{api_server.server_address[0]}:{api_server.server_address[1]}/app.js"
+    with urllib.request.urlopen(url, timeout=3) as response:
+        assert response.headers["Cache-Control"] == "no-store"
+
+
 @pytest.fixture
 def isolated_cache(tmp_path, monkeypatch):
     cache_path = tmp_path / "abletonosc-latency-report.json"
@@ -1318,6 +1324,5 @@ def test_generate_recommendations_safe_handling():
     assert "Plugin Inactive" in device_names
     assert "Plugin Unknown" in device_names
     assert "Plugin Zero" not in device_names
-
 
 
