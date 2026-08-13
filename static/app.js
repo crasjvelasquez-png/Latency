@@ -1192,7 +1192,13 @@ function updatePluginRow(row, item, maxSessionSamples) {
   const subtitleKind = item.subtitle_kind || "";
   row.classList.toggle("bottleneck", Boolean(item.is_bottleneck));
 
-  if (nameEl.textContent !== name) nameEl.textContent = name;
+  if (hasNumericValue(item.track_number)) {
+    const channelLabel = `Channel ${Number(item.track_number)}`;
+    const channelTitleHtml = `<span class="channel-number">${escapeHtml(channelLabel)}</span><span class="channel-name">${escapeHtml(name)}</span>`;
+    if (nameEl.innerHTML !== channelTitleHtml) nameEl.innerHTML = channelTitleHtml;
+  } else if (nameEl.textContent !== name) {
+    nameEl.textContent = name;
+  }
   nameEl.title = name;
   if (subtitleKind && subtitle) {
     const subtitleHtml = `<span class="track-kind ${escapeHtml(subtitleKind)}">${escapeHtml(subtitle)}</span>`;
@@ -1348,6 +1354,7 @@ function channelRows(report) {
   return [...groups.values()].map((group) => ({
     key: group.key,
     title: group.title,
+    track_number: group.track_number,
     subtitle: group.devices.slice().sort((a, b) => Number(b.latency_samples || 0) - Number(a.latency_samples || 0))[0]?.detail_name || "No latency device",
     latency_samples: group.latency_samples,
     latency_ms: group.latency_ms,

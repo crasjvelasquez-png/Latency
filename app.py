@@ -1591,6 +1591,57 @@ def reload_abletonosc():
     OSCRequest(timeout=OSC_RELOAD_TIMEOUT).send("/live/api/reload")
 
 
+def select_device_in_ableton(track_index, device_locator, expected_path):
+    if isinstance(track_index, bool) or not isinstance(track_index, int) or track_index < 0:
+        raise ValueError("track_index must be a non-negative integer")
+    if (
+        not isinstance(device_locator, list)
+        or not device_locator
+        or len(device_locator) % 2 == 0
+        or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in device_locator)
+    ):
+        raise ValueError("device_locator must contain a top-level device index followed by chain/device index pairs")
+    if (
+        not isinstance(expected_path, list)
+        or len(expected_path) != len(device_locator)
+        or any(not isinstance(value, str) or not value.strip() for value in expected_path)
+    ):
+        raise ValueError("expected_path must contain one non-empty name for every locator index")
+
+    response = OSCRequest(timeout=OSC_HANDLER_TIMEOUT).send(
+        "/live/view/select_device_path",
+        track_index,
+        len(device_locator),
+        *device_locator,
+        *expected_path,
+    )
+    args = list((response or {}).get("args") or ())
+    if not args:
+        raise RuntimeError("AbletonOSC returned an empty device-selection response")
+    if args[0] == "error":
+        code = str(args[1]) if len(args) > 1 else "selection_failed"
+        message = str(args[2]) if len(args) > 2 else "Could not select the device in Ableton Live"
+        error = RuntimeError(message)
+        error.code = code
+        raise error
+    if args[0] != "ok":
+        raise RuntimeError("AbletonOSC returned an invalid device-selection response")
+
+    resolved_path = [str(value) for value in args[3 + len(device_locator):]]
+    if resolved_path != expected_path:
+        error = RuntimeError("Device path changed; run a new scan")
+        error.code = "stale_scan"
+        raise error
+
+    subprocess.Popen(["open", "-a", "Ableton Live"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {
+        "ok": True,
+        "track_index": track_index,
+        "device_locator": device_locator,
+        "selected_path": resolved_path,
+    }
+
+
 def create_web_server(requested_port):
     ports = [requested_port]
     ports.extend(port for port in range(8800, WEB_PORT_MAX + 1) if port != requested_port)

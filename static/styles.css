@@ -1007,6 +1007,14 @@ select:focus-visible {
   text-overflow: ellipsis;
 }
 
+.plugin-name .channel-number {
+  font-weight: 700;
+}
+
+.plugin-name .channel-name {
+  font-weight: inherit;
+}
+
 .plugin-latency-val {
   grid-area: latency;
   text-align: right;
