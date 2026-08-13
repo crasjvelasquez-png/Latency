@@ -69,11 +69,28 @@
         const kindBadge = showTrackKind && inst.track_kind && inst.track_kind_label
           ? `<span class="track-kind ${escapeHtml(inst.track_kind)}">${escapeHtml(inst.track_kind_label)}</span>`
           : "";
+        const locator = Array.isArray(inst.device_locator)
+          ? inst.device_locator
+          : (Array.isArray(inst.path) && inst.path.length <= 1 && Number.isInteger(inst.device_index)
+            ? [inst.device_index]
+            : null);
+        const expectedPath = Array.isArray(inst.path) && inst.path.length === locator?.length
+          ? inst.path
+          : null;
+        const displayName = inst.detail_name || inst.track_name || "Unnamed Track";
+        const nameControl = locator && expectedPath && Number.isInteger(inst.track_index)
+          ? `<button class="plugin-instance-name" type="button"
+              data-track-index="${inst.track_index}"
+              data-device-locator="${escapeHtml(JSON.stringify(locator))}"
+              data-expected-path="${escapeHtml(JSON.stringify(expectedPath))}"
+              aria-label="Show ${escapeHtml(displayName)} in Ableton Live"
+              title="Show in Ableton Live">${escapeHtml(displayName)}</button>`
+          : `<span class="track-name-text">${escapeHtml(displayName)}</span>`;
         return `
           <div class="track-item${colClass}">
             <div class="track-name">
               <div class="track-name-main">
-                <span class="track-name-text">${escapeHtml(inst.detail_name || inst.track_name || "Unnamed Track")}</span>
+                ${nameControl}
                 <span class="track-status ${activeClass}">${activeText}</span>
               </div>
               ${kindBadge}

@@ -1472,7 +1472,14 @@ class Handler(SimpleHTTPRequestHandler):
                 "schema_version": API_SCHEMA_VERSION,
                 "app_id": API_APP_ID,
                 "transport": "local-only",
-                "endpoints": ["/api/status", "/api/scan", "/api/onboarding", "/api/last-scan", "/api/settings"],
+                "endpoints": [
+                    "/api/status",
+                    "/api/scan",
+                    "/api/onboarding",
+                    "/api/last-scan",
+                    "/api/settings",
+                    "/api/select-device",
+                ],
             })
             return
         if path == "/api/status":
@@ -1563,6 +1570,39 @@ class Handler(SimpleHTTPRequestHandler):
                 self.write_json(status, payload)
             finally:
                 _scan_lock.release()
+            return
+        if path == "/api/select-device":
+            if not self._local_request():
+                self.write_json(403, {"error": "Forbidden", "code": "forbidden"})
+                return
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+                if content_length <= 0:
+                    raise ValueError("Request body is required")
+                data = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("Request body must be a JSON object")
+                result = select_device_in_ableton(
+                    data.get("track_index"),
+                    data.get("device_locator"),
+                    data.get("expected_path"),
+                )
+                self.write_json(200, result)
+            except (ValueError, json.JSONDecodeError) as exc:
+                self.write_json(400, {"error": str(exc), "code": "invalid_device_target"})
+            except ResponsePortConflict as exc:
+                self.write_json(409, {"error": str(exc), "code": "response_port_conflict"})
+            except TimeoutError:
+                self.write_json(504, {
+                    "error": "AbletonOSC did not confirm the device selection.",
+                    "code": "osc_timeout",
+                })
+            except RuntimeError as exc:
+                code = getattr(exc, "code", "selection_failed")
+                status = 409 if code == "stale_scan" else 502
+                self.write_json(status, {"error": str(exc), "code": code})
+            except Exception as exc:
+                self.write_json(502, {"error": str(exc), "code": "selection_failed"})
             return
         if path == "/api/open-ableton":
             if not self._local_request():

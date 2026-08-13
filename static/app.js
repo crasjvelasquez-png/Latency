@@ -45,6 +45,7 @@ function getDom() {
     settingsModal: $("settingsModal"),
     settingsCloseButton: $("settingsCloseButton"),
     btnResetOnboarding: $("btnResetOnboarding"),
+    deviceSelectionStatus: $("deviceSelectionStatus"),
   };
   return _domDeferred;
 }
@@ -1193,7 +1194,7 @@ function updatePluginRow(row, item, maxSessionSamples) {
   row.classList.toggle("bottleneck", Boolean(item.is_bottleneck));
 
   if (hasNumericValue(item.track_number)) {
-    const channelLabel = `Channel ${Number(item.track_number)}`;
+    const channelLabel = `${Number(item.track_number)}. Track #`;
     const channelTitleHtml = `<span class="channel-number">${escapeHtml(channelLabel)}</span><span class="channel-name">${escapeHtml(name)}</span>`;
     if (nameEl.innerHTML !== channelTitleHtml) nameEl.innerHTML = channelTitleHtml;
   } else if (nameEl.textContent !== name) {
@@ -2229,7 +2230,67 @@ function toggleRow(row) {
   if (toggleBtn) toggleBtn.setAttribute("aria-expanded", String(expanded));
 }
 
+async function selectPluginInAbleton(button) {
+  if (button.getAttribute("aria-busy") === "true") return;
+
+  let deviceLocator;
+  let expectedPath;
+  try {
+    deviceLocator = JSON.parse(button.dataset.deviceLocator || "null");
+    expectedPath = JSON.parse(button.dataset.expectedPath || "null");
+  } catch (_err) {
+    return;
+  }
+
+  const trackIndex = Number(button.dataset.trackIndex);
+  const status = getDom().deviceSelectionStatus;
+  const originalTitle = button.title;
+  button.setAttribute("aria-busy", "true");
+  button.disabled = true;
+  button.classList.remove("selection-error");
+  if (status) status.textContent = `Opening ${button.textContent.trim()} in Ableton Live.`;
+
+  try {
+    const { res, data } = await api.localPost("/api/select-device", {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        track_index: trackIndex,
+        device_locator: deviceLocator,
+        expected_path: expectedPath,
+      }),
+    });
+    if (!res || !res.ok) {
+      const error = new Error(data?.error || "Could not show this plugin in Ableton Live.");
+      error.code = data?.code;
+      throw error;
+    }
+    if (status) status.textContent = `${expectedPath.at(-1)} is selected in Ableton Live. Press Delete there if you want to remove it.`;
+  } catch (err) {
+    const message = err.code === "stale_scan"
+      ? "The plugin moved since this scan. Run a new scan and try again."
+      : err.message || "Could not show this plugin in Ableton Live.";
+    button.classList.add("selection-error");
+    button.title = message;
+    if (status) status.textContent = message;
+    setTimeout(() => {
+      button.classList.remove("selection-error");
+      button.title = originalTitle;
+    }, 5000);
+  } finally {
+    button.removeAttribute("aria-busy");
+    button.disabled = false;
+  }
+}
+
 dom.results.addEventListener("click", (event) => {
+  const pluginName = event.target.closest(".plugin-instance-name");
+  if (pluginName) {
+    event.preventDefault();
+    event.stopPropagation();
+    selectPluginInAbleton(pluginName);
+    return;
+  }
+
   const toggle = event.target.closest(".plugin-toggle");
   if (toggle) {
     const row = toggle.closest(".plugin-row");

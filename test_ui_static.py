@@ -48,6 +48,18 @@ def test_static_ui_keeps_actions_delegated():
     assert parser.inline_clicks == []
 
 
+def test_plugin_names_are_the_ableton_selection_control():
+    components = (ROOT / "static" / "components.js").read_text()
+    app_js = APP_JS.read_text()
+
+    assert 'class="plugin-instance-name"' in components
+    assert 'data-device-locator=' in components
+    assert 'data-expected-path=' in components
+    assert 'api.localPost("/api/select-device"' in app_js
+    assert 'event.target.closest(".plugin-instance-name")' in app_js
+    assert "delete_device" not in app_js
+
+
 def test_app_dom_bindings_exist_in_html():
     parser = _parse_index()
     required_ids = set(re.findall(r'\$\("([^"]+)"\)', APP_JS.read_text()))

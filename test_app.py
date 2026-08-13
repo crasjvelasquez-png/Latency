@@ -319,6 +319,115 @@ def test_api_schema_endpoint_documents_local_contract(api_server):
     assert payload["app_id"] == API_APP_ID
     assert payload["transport"] == "local-only"
     assert "/api/status" in payload["endpoints"]
+    assert "/api/select-device" in payload["endpoints"]
+
+
+def test_select_device_in_ableton_sends_nested_locator(monkeypatch):
+    calls = []
+
+    class MockOSCRequest:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def send(self, address, *args):
+            calls.append((address, args))
+            return {
+                "address": address,
+                "args": ("ok", 2, 3, 1, 0, 4, "Rack", "Chain A", "Pro-Q 3"),
+            }
+
+    opened = []
+    monkeypatch.setattr(app, "OSCRequest", MockOSCRequest)
+    monkeypatch.setattr(app.subprocess, "Popen", lambda args, **kwargs: opened.append(args))
+
+    result = app.select_device_in_ableton(
+        2,
+        [1, 0, 4],
+        ["Rack", "Chain A", "Pro-Q 3"],
+    )
+
+    assert result["selected_path"] == ["Rack", "Chain A", "Pro-Q 3"]
+    assert calls == [(
+        "/live/view/select_device_path",
+        (2, 3, 1, 0, 4, "Rack", "Chain A", "Pro-Q 3"),
+    )]
+    assert opened == [["open", "-a", "Ableton Live"]]
+
+
+def test_select_device_in_ableton_rejects_stale_response(monkeypatch):
+    class MockOSCRequest:
+        def __init__(self, timeout):
+            pass
+
+        def send(self, address, *args):
+            return {"address": address, "args": ("error", "stale_scan", "Device path changed; run a new scan")}
+
+    monkeypatch.setattr(app, "OSCRequest", MockOSCRequest)
+
+    with pytest.raises(RuntimeError, match="run a new scan") as exc_info:
+        app.select_device_in_ableton(0, [1], ["Limiter"])
+    assert exc_info.value.code == "stale_scan"
+
+
+def test_api_select_device_requires_local_header(api_server):
+    status, payload = _http_json(
+        api_server,
+        "/api/select-device",
+        method="POST",
+        data={"track_index": 0, "device_locator": [1], "expected_path": ["Limiter"]},
+    )
+
+    assert status == 403
+    assert payload["code"] == "forbidden"
+
+
+def test_api_select_device_success(api_server, monkeypatch):
+    selected = []
+
+    def mock_select(track_index, locator, expected_path):
+        selected.append((track_index, locator, expected_path))
+        return {
+            "ok": True,
+            "track_index": track_index,
+            "device_locator": locator,
+            "selected_path": expected_path,
+        }
+
+    monkeypatch.setattr(app, "select_device_in_ableton", mock_select)
+    status, payload = _http_json(
+        api_server,
+        "/api/select-device",
+        method="POST",
+        headers={"X-Requested-With": "latency-manager"},
+        data={
+            "track_index": 3,
+            "device_locator": [2, 1, 0],
+            "expected_path": ["Rack", "Chain B", "Linear Phase EQ"],
+        },
+    )
+
+    assert status == 200
+    assert payload["ok"] is True
+    assert selected == [(3, [2, 1, 0], ["Rack", "Chain B", "Linear Phase EQ"])]
+
+
+@pytest.mark.parametrize("payload", [
+    {},
+    {"track_index": -1, "device_locator": [0], "expected_path": ["Plugin"]},
+    {"track_index": 0, "device_locator": [0, 1], "expected_path": ["Rack", "Chain"]},
+    {"track_index": 0, "device_locator": [0, 1, 2], "expected_path": ["Wrong length"]},
+])
+def test_api_select_device_rejects_invalid_targets(api_server, payload):
+    status, response = _http_json(
+        api_server,
+        "/api/select-device",
+        method="POST",
+        headers={"X-Requested-With": "latency-manager"},
+        data=payload,
+    )
+
+    assert status == 400
+    assert response["code"] == "invalid_device_target"
 
 
 def test_api_scan_success_returns_summarized_report(api_server, isolated_cache, monkeypatch):
@@ -1320,4 +1429,3 @@ def test_generate_recommendations_safe_handling():
     assert "Plugin Inactive" in device_names
     assert "Plugin Unknown" in device_names
     assert "Plugin Zero" not in device_names
-
