@@ -36,9 +36,6 @@
           <span class="plugin-name"></span>
           <div class="plugin-tracks"></div>
         </div>
-        <div class="plugin-bar-container">
-          <div class="latency-bar"></div>
-        </div>
         <div class="plugin-latency-val">
           <div class="plugin-latency-num-row">
             <span class="latency-number"></span> <span class="latency-unit">ms</span>

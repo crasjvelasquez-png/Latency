@@ -73,17 +73,31 @@ def test_scan_is_default_and_settings_opens_as_modal():
     assert 'id="settingsModal" class="modal settings-modal" role="dialog"' in html
 
 
-def test_settings_modal_is_wired_and_preferences_persist():
+def test_settings_modal_is_wired_without_refresh_preferences():
     js_content = APP_JS.read_text()
 
     assert 'd.settingsButton.addEventListener("click", openSettings)' in js_content
     assert 'd.settingsCloseButton.addEventListener("click"' in js_content
     assert "handleSettingsKeydown" in js_content
-    assert 'const PREFERENCES_KEY = "latency_preferences"' in js_content
-    assert "savePreferences()" in js_content
-    assert "settingsAutoRefresh" in js_content
-    assert "settingsRefreshInterval" in js_content
-    assert "settingsGrouping" in js_content
+    for removed in (
+        "latency_preferences", "autoRefresh", "intervalSeconds",
+        "settingsAutoRefresh", "settingsRefreshInterval",
+    ):
+        assert removed not in js_content
+
+
+def test_report_is_channel_only_search_and_inspect():
+    html = INDEX_HTML.read_text()
+    js_content = APP_JS.read_text()
+
+    assert 'id="searchInput"' in html
+    for removed_id in (
+        "sortSelect", "showAllToggle", "compareToggle", "rowCount",
+        "exportJson", "exportCsv", "byPluginToggle", "settingsGrouping",
+    ):
+        assert f'id="{removed_id}"' not in html
+    assert 'const raw = channelRows(report).filter(' in js_content
+    assert "b.latency_samples - a.latency_samples" in js_content
 
 
 class WorkflowHtmlParser(HTMLParser):

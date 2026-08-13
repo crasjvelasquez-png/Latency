@@ -20,31 +20,16 @@ function getDom() {
   _domDeferred = {
     ...dom,
     totalLatencyMs: $("totalLatencyMs"),
-    cumulativeLatencyMs: $("cumulativeLatencyMs"),
     bottleneckTrack: $("bottleneckTrack"),
+    highlightBottleneck: $("highlightBottleneck"),
     latencySkeleton: $("latencySkeleton"),
     bufferSkeleton: $("bufferSkeleton"),
     bufferSize: $("bufferSize"),
-    sampleRate: $("sampleRate"),
-    trackCount: $("trackCount"),
-    totalDevices: $("totalDevices"),
-    autoRefreshToggle: $("autoRefreshToggle"),
-    intervalTrigger: $("intervalTrigger"),
-    intervalDropdown: $("intervalDropdown"),
-    byChannelToggle: $("byChannelToggle"),
-    byPluginToggle: $("byPluginToggle"),
     reportToolbar: $("reportToolbar"),
     searchInput: $("searchInput"),
-    sortSelect: $("sortSelect"),
-    showAllToggle: $("showAllToggle"),
-    rowCount: $("rowCount"),
-    exportJson: $("exportJson"),
-    exportCsv: $("exportCsv"),
-    exportToast: $("exportToast"),
     shell: document.querySelector(".app-shell"),
     diagnosticsSummary: $("diagnosticsSummary"),
     diagnosticsBody: $("diagnosticsBody"),
-    compareToggle: $("compareToggle"),
     sessionInfo: $("sessionInfo"),
     timestampSkeleton: $("timestampSkeleton"),
     sessionSkeletons: $("sessionSkeletons"),
@@ -56,42 +41,26 @@ function getDom() {
     troubleshootingPath: $("troubleshootingPath"),
     troubleshootingContent: $("troubleshootingContent"),
     symptomBackBtn: $("symptomBackBtn"),
-    comparisonPanel: $("comparisonPanel"),
     settingsButton: $("settingsButton"),
     settingsModal: $("settingsModal"),
     settingsCloseButton: $("settingsCloseButton"),
-    settingsAutoRefresh: $("settingsAutoRefresh"),
-    settingsRefreshInterval: $("settingsRefreshInterval"),
-    settingsGrouping: $("settingsGrouping"),
     btnResetOnboarding: $("btnResetOnboarding"),
-    btnResetPreferences: $("btnResetPreferences"),
   };
   return _domDeferred;
 }
 
 const state = {
   scanning: false,
-  autoRefresh: false,
-  intervalSeconds: 30,
-  intervalId: null,
-  consecutiveFailures: 0,
-  currentBackoff: 30,
   lastScanTime: null,
   online: null,
   hasReport: false,
-  backgroundScanning: false,
-  groupMode: "channel",
   latestReport: null,
   diagnostics: null,
   connectionState: "checking",
   searchQuery: "",
-  sortKey: "latency-desc",
-  showAll: false,
-  compare: false,
   previousReport: null,
   scanAbort: null,
   statusAbort: null,
-  exportToastTimer: null,
   liveRunning: false,
   isLiveScan: false,
   workflowMode: "recording",
@@ -406,88 +375,8 @@ function getFocusableElements(container) {
   ).filter((el) => !el.disabled && el.offsetParent !== null);
 }
 
-const PREFERENCES_KEY = "latency_preferences";
-const DEFAULT_PREFERENCES = Object.freeze({
-  autoRefresh: false,
-  intervalSeconds: 30,
-  groupMode: "channel",
-});
-const REFRESH_INTERVALS = [5, 10, 30, 60];
-
-function readPreferences() {
-  try {
-    const stored = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || "{}");
-    return {
-      autoRefresh: typeof stored.autoRefresh === "boolean" ? stored.autoRefresh : DEFAULT_PREFERENCES.autoRefresh,
-      intervalSeconds: REFRESH_INTERVALS.includes(Number(stored.intervalSeconds))
-        ? Number(stored.intervalSeconds)
-        : DEFAULT_PREFERENCES.intervalSeconds,
-      groupMode: ["channel", "plugin"].includes(stored.groupMode)
-        ? stored.groupMode
-        : DEFAULT_PREFERENCES.groupMode,
-    };
-  } catch {
-    return { ...DEFAULT_PREFERENCES };
-  }
-}
-
-function savePreferences() {
-  try {
-    localStorage.setItem(PREFERENCES_KEY, JSON.stringify({
-      autoRefresh: state.autoRefresh,
-      intervalSeconds: state.intervalSeconds,
-      groupMode: state.groupMode,
-    }));
-  } catch {}
-}
-
-function syncPreferenceControls() {
-  const d = getDom();
-  d.autoRefreshToggle.checked = state.autoRefresh;
-  d.settingsAutoRefresh.checked = state.autoRefresh;
-  d.intervalTrigger.textContent = `${state.intervalSeconds}s`;
-  d.settingsRefreshInterval.value = String(state.intervalSeconds);
-  d.settingsGrouping.value = state.groupMode;
-  d.intervalDropdown.querySelectorAll(".interval-option").forEach((btn) => {
-    btn.classList.toggle("active", Number(btn.dataset.value) === state.intervalSeconds);
-  });
-}
-
-function applyPreferences(preferences, { persist = false } = {}) {
-  state.autoRefresh = preferences.autoRefresh;
-  state.intervalSeconds = preferences.intervalSeconds;
-  state.currentBackoff = preferences.intervalSeconds;
-  state.groupMode = preferences.groupMode;
-  syncPreferenceControls();
-  setGroupMode(preferences.groupMode);
-  if (persist) savePreferences();
-}
-
-function setAutoRefresh(enabled, { scanNow = false } = {}) {
-  state.autoRefresh = Boolean(enabled);
-  syncPreferenceControls();
-  savePreferences();
-  if (state.autoRefresh) {
-    if (scanNow) scan({ showLoading: false });
-    startAutoRefresh();
-  } else {
-    stopAutoRefresh();
-  }
-}
-
-function setRefreshInterval(seconds) {
-  const value = Number(seconds);
-  if (!REFRESH_INTERVALS.includes(value)) return;
-  state.intervalSeconds = value;
-  state.currentBackoff = value;
-  syncPreferenceControls();
-  savePreferences();
-  if (state.autoRefresh) rescheduleAutoRefresh();
-}
-
 function openSettings() {
   const d = getDom();
-  syncPreferenceControls();
   d.settingsModal.hidden = false;
   d.settingsButton.setAttribute("aria-expanded", "true");
   d.settingsCloseButton.focus();
@@ -736,7 +625,7 @@ async function reloadOSC() {
     const { res } = await api.localPost("/api/reload-osc", {
       signal: controller.signal,
     });
-    if (res.ok) setTimeout(() => scan({ showLoading: true }), 1500);
+    if (res.ok) setTimeout(() => scan(), 1500);
   } catch {} finally {
     clearTimeout(timeoutId);
   }
@@ -776,17 +665,13 @@ function setStatus(connectionStateOrOnline) {
   dom.statusPill.querySelector(".status-text").textContent = label;
 }
 
-function setScanningPill(active, background = false) {
+function setScanningPill(active) {
   if (!active) {
-    dom.statusPill.classList.remove("scanning", "scanning-bg");
+    dom.statusPill.classList.remove("scanning");
     return;
   }
-  if (background) {
-    dom.statusPill.classList.add("scanning-bg");
-  } else {
-    dom.statusPill.classList.add("scanning");
-    dom.statusPill.querySelector(".status-text").textContent = "Scanning…";
-  }
+  dom.statusPill.classList.add("scanning");
+  dom.statusPill.querySelector(".status-text").textContent = "Scanning…";
 }
 
 function setCurrentProject(project) {
@@ -842,10 +727,6 @@ function renderDiagnostics(diagnostics) {
     </div>`;
 }
 
-function preserveConnectedDuringBackgroundScan() {
-  return state.backgroundScanning && state.online === true;
-}
-
 const STATUS_TIMEOUT_MS = 3000;
 
 async function refreshStatus() {
@@ -859,9 +740,7 @@ async function refreshStatus() {
     state.latencyHandlerAvailable = data.latency_handler_available;
     state.automationPermission = data.automation_permission;
     state.lastError = data.last_error;
-    if (data.connection_state === "ready" || !preserveConnectedDuringBackgroundScan()) {
-      setStatus(data.connection_state || data.abletonosc_online);
-    }
+    setStatus(data.connection_state || data.abletonosc_online);
     renderDiagnostics(data.diagnostics);
     setCurrentProject(data.current_project);
     if (!state.lastScanTime && data.last_scan_time) {
@@ -875,7 +754,7 @@ async function refreshStatus() {
       setTotalLatencySeverity(state.latestReport.pdc_latency_ms, !state.isLiveScan || !state.liveRunning);
     }
   } catch {
-    if (!preserveConnectedDuringBackgroundScan()) setStatus("scan_failed");
+    setStatus("scan_failed");
     setCurrentProject(null);
   } finally {
     clearTimeout(timeoutId);
@@ -964,7 +843,7 @@ function updateLegend() {
   const container = $("legendContainer");
   if (!container) return;
 
-  const metricType = state.groupMode === "channel" ? "pdc" : "device";
+  const metricType = "pdc";
   const metricRules = WORKFLOW_RULES[state.workflowMode || "recording"][metricType];
   const lowRangeStart = typeof metricRules.lowLimit === "number" ? metricRules.lowLimit.toFixed(metricRules.lowLimit % 1 ? 1 : 0) : metricRules.lowLimit;
   const mediumRangeEnd = typeof metricRules.mediumLimit === "number" ? metricRules.mediumLimit.toFixed(metricRules.mediumLimit % 1 ? 1 : 0) : metricRules.mediumLimit;
@@ -1057,7 +936,7 @@ function updateScanTimestamp() {
 }
 
 function setTotalLatencySeverity(totalLatencyMs, isStale = false) {
-  const badge = $("latencySeverityBadge");
+  const badge = document.getElementById("latencySeverityBadge");
   if (!hasNumericValue(totalLatencyMs)) {
     getDom().totalLatencyMs.style.color = "";
     if (badge) {
@@ -1125,60 +1004,30 @@ function updateDashboardStats(report) {
     d.totalLatencyMs.textContent = "--";
     delete d.totalLatencyMs.dataset.value;
   }
-  d.cumulativeLatencyMs.textContent = hasNumericValue(report.cumulative_latency_ms)
-    ? `${fmtMs(report.cumulative_latency_ms)} ms cumulative`
-    : "Cumulative latency unavailable";
   const bottleneck = report.bottleneck_track;
   if (bottleneck) {
-    const trackIndexStr = bottleneck.track_index !== undefined && bottleneck.track_index !== null ? ` data-track-index="${bottleneck.track_index}"` : "";
-    d.bottleneckTrack.innerHTML = `${escapeHtml(bottleneck.track_name)} · ${bottleneck.device_count} device${bottleneck.device_count === 1 ? "" : "s"} <button class="highlight-action-link" ${trackIndexStr} data-track-name="${escapeHtml(bottleneck.track_name)}" aria-label="Highlight bottleneck track in report">Highlight in report</button>`;
+    d.bottleneckTrack.textContent = bottleneck.track_name;
+    d.highlightBottleneck.dataset.trackName = bottleneck.track_name;
+    if (bottleneck.track_index !== undefined && bottleneck.track_index !== null) {
+      d.highlightBottleneck.dataset.trackIndex = bottleneck.track_index;
+    } else {
+      delete d.highlightBottleneck.dataset.trackIndex;
+    }
+    d.highlightBottleneck.hidden = false;
   } else {
     d.bottleneckTrack.textContent = "No PDC bottleneck";
+    d.highlightBottleneck.hidden = true;
   }
-  const bufferBadge = $("bufferSeverityBadge");
   if (hasNumericValue(report.buffer_size)) {
     tweenText(d.bufferSize, Number(report.buffer_size), (n) => String(Math.round(n)));
-    if (isStale) {
-      d.bufferSize.style.color = "var(--muted)";
-      if (bufferBadge) {
-        bufferBadge.hidden = true;
-        bufferBadge.textContent = "";
-      }
-    } else {
-      const bufferVal = Number(report.buffer_size);
-      const bufferClass = getLatencyClass(bufferVal, 0, "buffer");
-
-      d.bufferSize.style.color = bufferClass === "high"
-        ? "var(--red)"
-        : bufferClass === "medium"
-          ? "var(--amber)"
-          : "var(--green)";
-
-      if (bufferBadge) {
-        bufferBadge.hidden = true;
-        bufferBadge.textContent = "";
-      }
-    }
   } else {
     d.bufferSize.textContent = "--";
-    d.bufferSize.style.color = "";
-    if (bufferBadge) {
-      bufferBadge.hidden = true;
-      bufferBadge.textContent = "";
-    }
   }
-  if (hasNumericValue(report.sample_rate)) {
-    tweenText(d.sampleRate, Number(report.sample_rate) / 1000, (n) => (n ? `${n.toFixed(1)}k` : "--"));
-  } else {
-    d.sampleRate.textContent = "--";
-  }
-  tweenText(d.trackCount, Number(report.track_count || 0), (n) => pluralize(Math.round(n), "track"));
-  tweenText(d.totalDevices, Number(report.device_count || 0), (n) => pluralize(Math.round(n), "device"));
 
-  const anyValueVisible = hasLatency || hasNumericValue(report.buffer_size) || hasNumericValue(report.sample_rate);
+  const anyValueVisible = hasLatency || hasNumericValue(report.buffer_size);
   if (anyValueVisible) {
     revealContent(
-      [d.totalLatencyMs, d.bufferSize, d.sampleRate, d.trackCount, d.totalDevices],
+      [d.totalLatencyMs, d.bufferSize],
       [d.latencySkeleton, d.bufferSkeleton]
     );
   }
@@ -1330,12 +1179,10 @@ function createPluginRow(item, maxSessionSamples) {
 }
 
 function updatePluginRow(row, item, maxSessionSamples) {
-  const type = state.groupMode === "channel" ? "pdc" : "device";
+  const type = "pdc";
   const latencyClass = getLatencyClass(item.latency_samples, item.latency_ms, type);
-  const widthPercent = Math.max((item.latency_samples / maxSessionSamples) * 100, 2);
   const nameEl = row.querySelector(".plugin-name");
   const tracksEl = row.querySelector(".plugin-tracks");
-  const barEl = row.querySelector(".latency-bar");
   const latencyEl = row.querySelector(".plugin-latency-val");
   const latencyNumberEl = row.querySelector(".latency-number");
   const deltaEl = row.querySelector(".delta-badge");
@@ -1354,14 +1201,12 @@ function updatePluginRow(row, item, maxSessionSamples) {
     tracksEl.textContent = subtitle;
   }
   tracksEl.title = subtitle;
-  barEl.className = `latency-bar ${latencyClass}`;
-  barEl.style.width = `${widthPercent}%`;
   latencyEl.className = `plugin-latency-val ${latencyClass}`;
   latencyNumberEl.textContent = fmtMs(item.latency_ms);
 
   if (deltaEl) {
     let deltaHtml = "";
-    if (state.compare && state.previousReport) {
+    if (false) {
       const prevMap = _previousPluginMap();
       const key = pluginKey({ device_name: item.title });
       const prev = prevMap.get(key);
@@ -1386,7 +1231,7 @@ function updatePluginRow(row, item, maxSessionSamples) {
     }
   }
 
-  const prevReport = state.compare ? state.previousReport : null;
+  const prevReport = null;
   const currentDeviceName = item.title;
   const detailsHtml = renderTrackDetails(item.instances || [], item.details || {}, prevReport, currentDeviceName);
   if (row._detailsHtml !== detailsHtml) {
@@ -1502,9 +1347,8 @@ function channelRows(report) {
   const bottleneck = report.bottleneck_track;
   return [...groups.values()].map((group) => ({
     key: group.key,
-    title: group.track_number === "--" ? group.title : `${group.track_number}. ${group.title}`,
-    subtitle: group.track_kind_label,
-    subtitle_kind: group.track_kind,
+    title: group.title,
+    subtitle: group.devices.slice().sort((a, b) => Number(b.latency_samples || 0) - Number(a.latency_samples || 0))[0]?.detail_name || "No latency device",
     latency_samples: group.latency_samples,
     latency_ms: group.latency_ms,
     instance_count: group.devices.length,
@@ -1518,17 +1362,9 @@ function channelRows(report) {
 // ── Filter & sort ──
 
 function sortRows(rows) {
-  const key = state.sortKey;
-  return rows.slice().sort((a, b) => {
-    switch (key) {
-      case "latency-asc":
-        return a.latency_samples - b.latency_samples || a.latency_ms - b.latency_ms || compareRowsByStableLabel(a, b);
-      case "instances-desc":
-        return (b.instance_count || 0) - (a.instance_count || 0) || b.latency_samples - a.latency_samples || compareRowsByStableLabel(a, b);
-      default:
-        return b.latency_samples - a.latency_samples || b.latency_ms - a.latency_ms || compareRowsByStableLabel(a, b);
-    }
-  });
+  return rows.slice().sort((a, b) =>
+    b.latency_samples - a.latency_samples || b.latency_ms - a.latency_ms || compareRowsByStableLabel(a, b)
+  );
 }
 
 function filterRows(rows) {
@@ -1541,32 +1377,9 @@ function filterRows(rows) {
 }
 
 function currentRows(report) {
-  const raw = state.groupMode === "channel" ? channelRows(report) : pluginRows(report);
+  const raw = channelRows(report).filter((row) => row.latency_samples > 0 || row.latency_ms > 0);
   const filtered = filterRows(raw);
-  const sorted = sortRows(filtered);
-  if (!state.showAll && state.groupMode === "channel") return sorted.slice(0, 10);
-  return sorted;
-}
-
-function totalRowCount(report) {
-  if (state.groupMode === "channel") {
-    const keys = new Set();
-    (report.devices || []).forEach((d) => {
-      const key = hasNumericValue(d.track_index) ? d.track_index : (d.track_name || "");
-      keys.add(key);
-    });
-    return keys.size;
-  }
-  return (report.plugins || []).length;
-}
-
-function updateRowCount(shown, total) {
-  const d = getDom();
-  if (shown === total) {
-    d.rowCount.textContent = `${total} items`;
-  } else {
-    d.rowCount.textContent = `${shown} / ${total}`;
-  }
+  return sortRows(filtered);
 }
 
 function renderComparison(report) {
@@ -1702,12 +1515,10 @@ function renderComparison(report) {
 // ── Results rendering ──
 
 function updateResults(report) {
-  renderComparison(report);
-  const total = totalRowCount(report);
+  const total = channelRows(report).filter((row) => row.latency_samples > 0 || row.latency_ms > 0).length;
   const rows = currentRows(report);
   const rowKeys = rows.map((row) => row.key).join("\n");
 
-  updateRowCount(rows.length, total);
 
   if (dom.results.dataset.state === "loading") {
     dom.results.className = "results";
@@ -1911,31 +1722,13 @@ function exportCsv() {
 
 // ── Group mode ──
 
-function setGroupMode(mode) {
-  const changed = state.groupMode !== mode;
-  state.groupMode = mode;
-  const d = getDom();
-  d.byChannelToggle.classList.toggle("active", mode === "channel");
-  d.byPluginToggle.classList.toggle("active", mode === "plugin");
-  d.byChannelToggle.setAttribute("aria-pressed", String(mode === "channel"));
-  d.byPluginToggle.setAttribute("aria-pressed", String(mode === "plugin"));
-  d.searchInput.placeholder =
-    mode === "channel" ? "Filter by track or plug-in\u2026" : "Filter by plug-in name\u2026";
-  updateLegend();
-  if (changed && state.latestReport) {
-    updateDashboardStats(state.latestReport);
-    updateResults(state.latestReport);
-  }
-}
-
 // ── Scan ──
 
 const SCAN_TIMEOUT_MS = 10000;
 
-async function scan({ showLoading = true } = {}) {
+async function scan() {
   if (state.scanning) return;
   state.scanning = true;
-  state.backgroundScanning = !showLoading;
 
   if (state.scanAbort) state.scanAbort.abort();
   const controller = new AbortController();
@@ -1943,8 +1736,8 @@ async function scan({ showLoading = true } = {}) {
 
   dom.scanButton.disabled = true;
   dom.scanButton.classList.add("scanning");
-  if (showLoading && !state.hasReport) renderLoading();
-  setScanningPill(true, !showLoading);
+  if (!state.hasReport) renderLoading();
+  setScanningPill(true);
 
   const timeoutId = setTimeout(() => controller.abort(), SCAN_TIMEOUT_MS);
 
@@ -1975,8 +1768,6 @@ async function scan({ showLoading = true } = {}) {
     }
 
     setStatus(true);
-    state.consecutiveFailures = 0;
-    state.currentBackoff = state.intervalSeconds;
     state.lastScanTime = new Date();
     updateScanTimestamp();
     state.isLiveScan = true;
@@ -1993,13 +1784,8 @@ async function scan({ showLoading = true } = {}) {
     }
     const preserveResults = state.hasReport || Boolean(payload.cached_report);
     setStatus(payload.connection_state || "scan_failed");
-    state.consecutiveFailures++;
-    if (state.consecutiveFailures >= 3) {
-      state.currentBackoff = Math.min(state.currentBackoff * 2, 120);
-      rescheduleAutoRefresh();
-    }
     if (err.message && err.message.includes("not responding")) {
-      if (!preserveResults && !preserveConnectedDuringBackgroundScan()) setStatus(false);
+      if (!preserveResults) setStatus(false);
       if (!preserveResults) {
         state.latestReport = null;
         renderOffline();
@@ -2012,7 +1798,6 @@ async function scan({ showLoading = true } = {}) {
     clearTimeout(timeoutId);
     if (state.scanAbort === controller) state.scanAbort = null;
     state.scanning = false;
-    state.backgroundScanning = false;
     setScanningPill(false);
     setStatus(state.connectionState);
     dom.scanButton.disabled = false;
@@ -2020,31 +1805,8 @@ async function scan({ showLoading = true } = {}) {
   }
 }
 
-// ── Auto-refresh ──
-
-function startAutoRefresh() {
-  stopAutoRefresh();
-  state.intervalId = setInterval(() => scan({ showLoading: false }), state.currentBackoff * 1000);
-}
-
-function stopAutoRefresh() {
-  if (state.intervalId) {
-    clearInterval(state.intervalId);
-    state.intervalId = null;
-  }
-  if (state.scanAbort) {
-    state.scanAbort.abort();
-    state.scanAbort = null;
-  }
-}
-
-function rescheduleAutoRefresh() {
-  if (state.autoRefresh) startAutoRefresh();
-}
-
 function beginInitialScan() {
-  scan({ showLoading: true });
-  if (state.autoRefresh) startAutoRefresh();
+  scan();
 }
 
 function highlightRowInReport(target) {
@@ -2056,9 +1818,6 @@ function highlightRowInReport(target) {
   let keyToHighlight = null;
 
   if (hasTrack) {
-    // Ensure we are in "channel" view.
-    setGroupMode("channel");
-
     const report = state.latestReport;
     const rows = channelRows(report);
 
@@ -2074,16 +1833,15 @@ function highlightRowInReport(target) {
       keyToHighlight = targetRow.key;
     }
   } else if (hasPlugins) {
-    // Ensure we are in "plugin" view.
-    setGroupMode("plugin");
-
     const report = state.latestReport;
-    const rows = pluginRows(report);
+    const rows = channelRows(report);
 
     let targetRow = null;
     for (const pName of target.pluginNames) {
       const targetKey = pluginKey({ device_name: pName });
-      targetRow = rows.find(r => r.key === `plugin:${targetKey}`);
+      targetRow = rows.find((row) =>
+        (row.instances || []).some((device) => pluginKey(device) === targetKey)
+      );
       if (targetRow) break;
     }
 
@@ -2094,7 +1852,7 @@ function highlightRowInReport(target) {
 
   if (!keyToHighlight) return;
 
-  // 2. Reveal hidden rows if target is outside top-10 view or filtered out.
+  // 2. Clear a search filter when it hides the target channel.
   let activeRows = currentRows(state.latestReport);
   let isPresent = activeRows.some(r => r.key === keyToHighlight);
 
@@ -2104,12 +1862,6 @@ function highlightRowInReport(target) {
     if (state.searchQuery) {
       state.searchQuery = "";
       d.searchInput.value = "";
-      changed = true;
-    }
-
-    if (!state.showAll) {
-      state.showAll = true;
-      d.showAllToggle.checked = true;
       changed = true;
     }
 
@@ -2342,55 +2094,9 @@ function bindDeferredEvents() {
     d.recommendations.addEventListener("click", handleHighlightClick);
   }
 
-  if (d.bottleneckTrack) {
-    d.bottleneckTrack.addEventListener("click", handleHighlightClick);
+  if (d.highlightBottleneck) {
+    d.highlightBottleneck.addEventListener("click", handleHighlightClick);
   }
-
-  d.autoRefreshToggle.addEventListener("change", () => {
-    setAutoRefresh(d.autoRefreshToggle.checked, { scanNow: true });
-  });
-
-  d.intervalTrigger.addEventListener("click", (e) => {
-    e.stopPropagation();
-    toggleIntervalDropdown();
-  });
-
-  d.intervalTrigger.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      toggleIntervalDropdown();
-    }
-    if (e.key === "Escape") {
-      closeIntervalDropdown();
-    }
-  });
-
-  d.intervalDropdown.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      closeIntervalDropdown();
-      d.intervalTrigger.focus();
-    }
-  });
-
-  d.intervalDropdown.addEventListener("click", (e) => {
-    const option = e.target.closest(".interval-option");
-    if (!option) return;
-    const val = parseInt(option.dataset.value, 10);
-    setRefreshInterval(val);
-    closeIntervalDropdown();
-    d.intervalTrigger.focus();
-  });
-
-  d.byChannelToggle.addEventListener("click", () => {
-    setGroupMode("channel");
-    syncPreferenceControls();
-    savePreferences();
-  });
-  d.byPluginToggle.addEventListener("click", () => {
-    setGroupMode("plugin");
-    syncPreferenceControls();
-    savePreferences();
-  });
 
   d.settingsButton.addEventListener("click", openSettings);
   d.settingsCloseButton.addEventListener("click", () => closeSettings());
@@ -2398,24 +2104,6 @@ function bindDeferredEvents() {
     if (event.target === d.settingsModal) closeSettings();
   });
   d.settingsModal.addEventListener("keydown", handleSettingsKeydown);
-  d.settingsAutoRefresh.addEventListener("change", () => {
-    setAutoRefresh(d.settingsAutoRefresh.checked, { scanNow: true });
-  });
-  d.settingsRefreshInterval.addEventListener("change", () => {
-    setRefreshInterval(d.settingsRefreshInterval.value);
-  });
-  d.settingsGrouping.addEventListener("change", () => {
-    setGroupMode(d.settingsGrouping.value);
-    syncPreferenceControls();
-    savePreferences();
-  });
-  d.btnResetPreferences.addEventListener("click", () => {
-    stopAutoRefresh();
-    try {
-      localStorage.removeItem(PREFERENCES_KEY);
-    } catch {}
-    applyPreferences({ ...DEFAULT_PREFERENCES });
-  });
   d.btnResetOnboarding.addEventListener("click", () => {
     closeSettings({ restoreFocus: false });
     resetOnboardingPreference(d.settingsButton);
@@ -2429,24 +2117,6 @@ function bindDeferredEvents() {
       if (state.latestReport) updateResults(state.latestReport);
     }, 150);
   });
-
-  d.sortSelect.addEventListener("change", () => {
-    state.sortKey = d.sortSelect.value;
-    if (state.latestReport) updateResults(state.latestReport);
-  });
-
-  d.showAllToggle.addEventListener("change", () => {
-    state.showAll = d.showAllToggle.checked;
-    if (state.latestReport) updateResults(state.latestReport);
-  });
-
-  d.compareToggle.addEventListener("change", () => {
-    state.compare = d.compareToggle.checked;
-    if (state.latestReport) updateResults(state.latestReport);
-  });
-
-  d.exportJson.addEventListener("click", exportJson);
-  d.exportCsv.addEventListener("click", exportCsv);
 
   d.workflowSelector.addEventListener("click", (e) => {
     const btn = e.target.closest(".workflow-btn");
@@ -2505,32 +2175,12 @@ function bindDeferredEvents() {
   }
 }
 
-function openIntervalDropdown() {
-  const d = getDom();
-  d.intervalDropdown.classList.add("open");
-  const active = d.intervalDropdown.querySelector(".interval-option.active") || d.intervalDropdown.querySelector(".interval-option");
-  if (active) active.focus();
-}
-
-function closeIntervalDropdown() {
-  getDom().intervalDropdown.classList.remove("open");
-}
-
-function toggleIntervalDropdown() {
-  const d = getDom();
-  if (d.intervalDropdown.classList.contains("open")) {
-    closeIntervalDropdown();
-  } else {
-    openIntervalDropdown();
-  }
-}
-
 document.addEventListener("click", (e) => {
   const action = e.target.closest("[data-action]");
   if (action) {
     switch (action.dataset.action) {
       case "scan":
-        scan({ showLoading: true });
+        scan();
         break;
       case "open-ableton":
         openAbleton();
@@ -2542,17 +2192,12 @@ document.addEventListener("click", (e) => {
     return;
   }
 
-  const d = getDom();
-  if (!d.intervalDropdown.contains(e.target) && e.target !== d.intervalTrigger) {
-    closeIntervalDropdown();
-  }
 });
 
 // ── Visibility pause ──
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
-    stopAutoRefresh();
     if (state.scanAbort) {
       state.scanAbort.abort();
       state.scanAbort = null;
@@ -2566,10 +2211,6 @@ document.addEventListener("visibilitychange", () => {
       cancelAnimationFrame(tweenFrameId);
       tweenFrameId = null;
     }
-  } else if (state.autoRefresh) {
-    state.currentBackoff = state.intervalSeconds;
-    scan({ showLoading: false });
-    startAutoRefresh();
   }
 });
 
@@ -2642,7 +2283,7 @@ dom.results.addEventListener("keydown", (e) => {
   }
 });
 
-dom.scanButton.addEventListener("click", () => scan({ showLoading: true }));
+dom.scanButton.addEventListener("click", () => scan());
 
 // ── Onboarding ──
 
@@ -2866,7 +2507,6 @@ function setWorkflowMode(mode) {
 // ── Init ──
 
 async function init() {
-  applyPreferences(readPreferences());
   const storedWorkflowMode = localStorage.getItem("latency_workflow_mode");
   state.workflowMode = WORKFLOW_MODES.includes(storedWorkflowMode) ? storedWorkflowMode : "recording";
   bindDeferredEvents();

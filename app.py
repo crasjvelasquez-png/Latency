@@ -38,8 +38,6 @@ CACHED_REPORT_PATH = APP_SUPPORT_DIR / "abletonosc-latency-report.json"
 LOCK_FILE = APP_SUPPORT_DIR / "latency_manager.lock"
 SETTINGS_PATH = APP_SUPPORT_DIR / "settings.json"
 DEFAULT_SETTINGS = {
-    "auto_refresh": False,
-    "refresh_interval": 30,
     "grouping": "channel",
     "workflow_mode": "standard",
 }
@@ -53,12 +51,6 @@ def load_settings():
             data = json.load(f)
 
         settings = dict(DEFAULT_SETTINGS)
-        if isinstance(data.get("auto_refresh"), bool):
-            settings["auto_refresh"] = data["auto_refresh"]
-
-        if isinstance(data.get("refresh_interval"), int) and data["refresh_interval"] in [5, 10, 30, 60]:
-            settings["refresh_interval"] = data["refresh_interval"]
-
         if data.get("grouping") in ["channel", "plugin"]:
             settings["grouping"] = data["grouping"]
 
@@ -73,12 +65,6 @@ def load_settings():
 
 def save_settings(settings):
     validated = dict(DEFAULT_SETTINGS)
-    if isinstance(settings.get("auto_refresh"), bool):
-        validated["auto_refresh"] = settings["auto_refresh"]
-
-    if isinstance(settings.get("refresh_interval"), int) and settings["refresh_interval"] in [5, 10, 30, 60]:
-        validated["refresh_interval"] = settings["refresh_interval"]
-
     if settings.get("grouping") in ["channel", "plugin"]:
         validated["grouping"] = settings["grouping"]
 
@@ -1529,10 +1515,6 @@ class Handler(SimpleHTTPRequestHandler):
                 return
 
             current = load_settings()
-            if "auto_refresh" in data:
-                current["auto_refresh"] = data["auto_refresh"]
-            if "refresh_interval" in data:
-                current["refresh_interval"] = data["refresh_interval"]
             if "grouping" in data:
                 current["grouping"] = data["grouping"]
             if "workflow_mode" in data:

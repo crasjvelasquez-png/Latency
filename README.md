@@ -60,7 +60,6 @@ python3 -m pip install -r requirements.txt
 ## Features
 
 - **Manual scan** — click Scan Now to export and analyze latency for the current Live set.
-- **Auto-refresh** — toggle automatic scanning at 15s, 30s, or 60s intervals. Pauses when the browser tab is hidden and backs off after repeated failures.
 - **Top 10 worst offenders** — ranked by max latency with instance details, track locations, and stacked latency totals.
 - **Connection monitoring** — status polling every 5 seconds with online/offline indicators.
 

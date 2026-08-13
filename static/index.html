@@ -33,22 +33,6 @@
             <span class="status-text">Checking</span>
           </div>
         </div>
-        <div class="refresh-controls">
-          <label class="toggle-switch">
-            <input type="checkbox" id="autoRefreshToggle">
-            <span class="toggle-track"></span>
-            <span class="toggle-label">Auto-refresh</span>
-          </label>
-          <div class="interval-popdown">
-            <button id="intervalTrigger" class="interval-trigger" type="button">30s</button>
-            <div id="intervalDropdown" class="interval-dropdown">
-              <button class="interval-option" data-value="5" type="button">5s</button>
-              <button class="interval-option" data-value="10" type="button">10s</button>
-              <button class="interval-option active" data-value="30" type="button">30s</button>
-              <button class="interval-option" data-value="60" type="button">60s</button>
-            </div>
-          </div>
-        </div>
         <div class="scan-controls">
           <button id="scanButton" class="scan-button" type="button">
             <span class="icon-scan" aria-hidden="true"></span>
@@ -72,44 +56,18 @@
           <button type="button" class="workflow-btn" data-mode="mixing" role="radio" aria-checked="false">Mixing</button>
         </div>
       </div>
-      <section class="dashboard-summary" aria-label="Dashboard summary">
-      <div class="info-card" id="summaryCardLatency">
-        <div class="info-card-header">
-          <h3>PDC latency</h3>
-        </div>
-        <div class="info-card-value">
-          <strong id="totalLatencyMs" hidden>--</strong><span class="unit">ms</span>
-          <span id="latencySeverityBadge" class="severity-badge" hidden></span>
+      <section class="recording-verdict" aria-label="Recording verdict">
+        <div class="recording-verdict-line">
+          <strong id="totalLatencyMs" hidden>--</strong><span>ms bottleneck</span>
+          <span class="verdict-separator" aria-hidden="true">·</span>
+          <strong id="bottleneckTrack">Finding bottleneck…</strong>
+          <span class="verdict-separator" aria-hidden="true">·</span>
+          <span>Buffer <strong id="bufferSize" hidden>--</strong></span>
           <span id="latencySkeleton" class="skeleton skeleton-value" aria-hidden="true"></span>
-        </div>
-        <div class="info-card-meta"><span id="bottleneckTrack">Finding bottleneck…</span> · <span id="cumulativeLatencyMs" title="Sum of all device latencies across every track.">-- ms cumulative</span></div>
-        <details class="latency-disclosure">
-          <summary class="latency-disclosure-summary">
-            <span class="info-icon-inline" aria-hidden="true">i</span>
-            <span>PDC vs. Cumulative Latency</span>
-          </summary>
-          <div class="latency-disclosure-content">
-            <p><strong>PDC Latency</strong> is driven by the highest-latency track/path and affects set-wide compensation to keep tracks in sync.</p>
-            <p><strong>Cumulative Latency</strong> is the sum of reported device latency across the set and is not the amount every track is delayed.</p>
-          </div>
-        </details>
-      </div>
-
-      <div class="info-card" id="summaryCardBuffer">
-        <div class="info-card-header">
-          <h3>Buffer · sample rate</h3>
-        </div>
-        <div class="info-card-value">
-          <strong id="bufferSize" hidden>--</strong><span class="unit">/ <span id="sampleRate" hidden>--</span></span>
-          <span id="bufferSeverityBadge" class="severity-badge" hidden></span>
           <span id="bufferSkeleton" class="skeleton skeleton-value" aria-hidden="true"></span>
         </div>
-        <div class="info-card-meta">
-          <span id="trackCount" hidden>-- tracks</span> · <span id="totalDevices" hidden>-- devices</span>
-        </div>
-      </div>
-
-    </section>
+        <button id="highlightBottleneck" class="highlight-action-link" type="button" hidden>Highlight in report</button>
+      </section>
 
     <section id="recommendations" class="recommendations-panel feature-hidden" aria-label="Recommendations" aria-hidden="true" hidden>
       <div class="recommendations-header">
@@ -164,54 +122,20 @@
     </section>
 
     <section class="report-panel">
-      <!-- Before/After Verification Flow -->
-      <div id="comparisonPanel" class="comparison-panel" hidden></div>
       <div class="panel-header">
         <div>
-          <h2>Plugins</h2>
+          <h2>Channels</h2>
           <div class="legend" id="legendContainer">
             <span class="legend-item"><span class="dot green"></span>&lt; 20 ms</span>
             <span class="legend-item"><span class="dot yellow"></span>20-100 ms</span>
             <span class="legend-item"><span class="dot red"></span>100+ ms</span>
           </div>
         </div>
-        <div class="view-toggle" role="group" aria-label="Group plugins by">
-          <button id="byChannelToggle" class="view-toggle-button active" type="button" data-view="channel" aria-pressed="true">By channel</button>
-          <button id="byPluginToggle" class="view-toggle-button" type="button" data-view="plugin" aria-pressed="false">By plugin</button>
-        </div>
       </div>
       <div class="report-toolbar" id="reportToolbar" hidden>
-        <div class="toolbar-left">
-          <div class="search-box">
-            <span class="icon-search" aria-hidden="true"></span>
-            <input type="text" id="searchInput" placeholder="Filter by name or track..." aria-label="Filter results" autocomplete="off" spellcheck="false">
-          </div>
-          <div class="sort-control">
-            <label for="sortSelect" class="sort-label">Sort</label>
-            <select id="sortSelect">
-              <option value="latency-desc">Latency (high first)</option>
-              <option value="latency-asc">Latency (low first)</option>
-              <option value="instances-desc">Instances (most)</option>
-            </select>
-          </div>
-        </div>
-        <div class="toolbar-right">
-          <label class="show-all-label">
-            <input type="checkbox" id="showAllToggle">
-            <span class="check-box"></span>
-            <span>Show all</span>
-          </label>
-          <label class="show-all-label">
-            <input type="checkbox" id="compareToggle">
-            <span class="check-box"></span>
-            <span>Compare</span>
-          </label>
-          <span id="rowCount" class="row-count"></span>
-          <div class="export-group">
-            <button id="exportJson" class="export-button" type="button">JSON</button>
-            <button id="exportCsv" class="export-button" type="button">CSV</button>
-          </div>
-          <span id="exportToast" class="export-toast" aria-live="polite" role="status"></span>
+        <div class="search-box">
+          <span class="icon-search" aria-hidden="true"></span>
+          <input type="text" id="searchInput" placeholder="Filter by track or plug-in…" aria-label="Filter channels" autocomplete="off" spellcheck="false">
         </div>
       </div>
       <div id="results" class="results loading" data-state="loading">
@@ -237,54 +161,6 @@
         </div>
 
         <div class="settings-form">
-          <!-- Setting Card: Auto-refresh -->
-          <div class="settings-card">
-            <div class="settings-card-header">
-              <div class="settings-card-info">
-                <h3>Default auto-refresh</h3>
-                <p class="settings-desc">Enable auto-refresh by default on launch.</p>
-              </div>
-              <label class="toggle-switch">
-                <input type="checkbox" id="settingsAutoRefresh" aria-label="Default auto-refresh">
-                <span class="toggle-track"></span>
-              </label>
-            </div>
-          </div>
-
-          <!-- Setting Card: Refresh Interval -->
-          <div class="settings-card">
-            <div class="settings-card-header">
-              <div class="settings-card-info">
-                <h3>Default refresh interval</h3>
-                <p class="settings-desc">How often the app scans when auto-refresh is active.</p>
-              </div>
-              <div class="settings-select-wrapper">
-                <select id="settingsRefreshInterval" class="settings-select" aria-label="Default refresh interval">
-                  <option value="5">5 seconds</option>
-                  <option value="10">10 seconds</option>
-                  <option value="30">30 seconds</option>
-                  <option value="60">60 seconds</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <!-- Setting Card: Grouping -->
-          <div class="settings-card">
-            <div class="settings-card-header">
-              <div class="settings-card-info">
-                <h3>Default grouping</h3>
-                <p class="settings-desc">How latency results are aggregated by default on launch.</p>
-              </div>
-              <div class="settings-select-wrapper">
-                <select id="settingsGrouping" class="settings-select" aria-label="Default grouping">
-                  <option value="channel">By channel</option>
-                  <option value="plugin">By plugin</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
           <!-- Setting Card: Workflow Mode -->
           <div class="settings-card feature-hidden" aria-hidden="true">
             <div class="settings-card-header">
@@ -304,11 +180,10 @@
           <div class="settings-card danger-zone">
             <div class="settings-card-info">
               <h3>Maintenance</h3>
-              <p class="settings-desc">Reset checklist status or clear local configuration.</p>
+              <p class="settings-desc">Reset the setup checklist if the session configuration changes.</p>
             </div>
             <div class="settings-actions">
               <button id="btnResetOnboarding" class="settings-btn" type="button">Reset checklist</button>
-              <button id="btnResetPreferences" class="settings-btn danger" type="button">Reset all preferences</button>
             </div>
           </div>
         </div>

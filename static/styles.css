@@ -210,7 +210,6 @@ select:focus-visible {
 }
 
 .connection-status,
-.refresh-controls,
 .scan-controls {
   display: flex;
   align-items: center;
@@ -259,131 +258,11 @@ select:focus-visible {
   animation: pulse-dot 1.5s infinite;
 }
 
-.status-pill.scanning-bg .dot {
-  background: var(--amber);
-  opacity: 0.6;
-  box-shadow: 0 0 4px rgba(240, 183, 50, 0.25);
-}
 
 @keyframes pulse-dot {
   0% { box-shadow: 0 0 0 0 rgba(240, 183, 50, 0.4); }
   70% { box-shadow: 0 0 0 6px rgba(240, 183, 50, 0); }
   100% { box-shadow: 0 0 0 0 rgba(240, 183, 50, 0); }
-}
-
-/* ── Toggle switch ── */
-.toggle-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--text);
-  user-select: none;
-}
-
-.toggle-switch input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.toggle-track {
-  width: 28px;
-  height: 16px;
-  background: #333;
-  border-radius: 8px;
-  position: relative;
-  transition: background var(--dur-base);
-}
-
-.toggle-track::before {
-  content: "";
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 12px;
-  height: 12px;
-  background: #fff;
-  border-radius: 50%;
-  transition: transform var(--dur-base);
-}
-
-.toggle-switch input:checked + .toggle-track {
-  background: var(--green);
-}
-
-.toggle-switch input:checked + .toggle-track::before {
-  transform: translateX(12px);
-}
-
-.toggle-switch input:focus-visible + .toggle-track {
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.45);
-}
-
-/* ── Interval popdown ── */
-.interval-popdown {
-  position: relative;
-}
-
-.interval-trigger {
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-  padding: 0;
-  min-width: 32px;
-  text-align: left;
-}
-
-.interval-trigger:hover {
-  color: var(--text);
-}
-
-.interval-dropdown {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  background: var(--card-bg);
-  border: 1px solid var(--card-border);
-  border-radius: var(--radius);
-  padding: 4px;
-  display: none;
-  flex-direction: row;
-  gap: 2px;
-  z-index: 10;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-}
-
-.interval-dropdown.open {
-  display: flex;
-}
-
-.interval-option {
-  height: 32px;
-  padding: 0 12px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--muted);
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: color var(--dur-fast);
-}
-
-.interval-option:hover {
-  color: var(--text);
-}
-
-.interval-option.active {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text);
 }
 
 /* ── Scan Button ── */
@@ -457,7 +336,7 @@ select:focus-visible {
 }
 
 /* ── Content Visibility for Off-Screen Panels ── */
-.dashboard-summary,
+.recording-verdict,
 .recommendations-panel,
 .diagnostics-panel,
 .report-panel {
@@ -465,55 +344,35 @@ select:focus-visible {
   contain-intrinsic-size: 0 300px;
 }
 
-/* ── Info cards ── */
-.dashboard-summary {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 12px;
+/* ── Recording verdict ── */
+.recording-verdict {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 16px;
+  background: var(--card-bg);
+  border-radius: var(--radius);
   margin-bottom: 24px;
 }
 
-.info-card {
-  background: var(--card-bg);
-  border-radius: var(--radius);
-  padding: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.info-card-header h3 {
-  font-size: 12px;
-  color: var(--muted);
-  font-weight: 500;
-}
-
-.info-card-value {
+.recording-verdict-line {
   display: flex;
   align-items: baseline;
-  gap: 8px;
-}
-
-.info-card-value strong {
-  font-size: 32px;
-  font-weight: 400;
-  line-height: 1;
-  color: var(--text);
-}
-
-.info-card-value strong.text-red {
-  color: var(--red);
-}
-
-.info-card-value .unit {
+  flex-wrap: wrap;
+  gap: 6px;
   color: var(--muted);
   font-size: 14px;
 }
 
-.info-card-meta {
-  font-size: 13px;
+.recording-verdict-line strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.verdict-separator {
   color: var(--dim);
-  margin-top: auto;
 }
 
 /* ── Diagnostics ── */
@@ -1109,8 +968,8 @@ select:focus-visible {
 
 .plugin-main {
   display: grid;
-  grid-template-columns: minmax(160px, 1.2fr) minmax(80px, 2fr) 72px 36px;
-  grid-template-areas: "info bar latency toggle";
+  grid-template-columns: minmax(0, 1fr) 72px 36px;
+  grid-template-areas: "info latency toggle";
   gap: 16px;
   align-items: center;
   padding: 14px 20px;
@@ -1146,31 +1005,6 @@ select:focus-visible {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.plugin-bar-container {
-  grid-area: bar;
-  display: flex;
-  align-items: center;
-}
-
-.latency-bar {
-  height: 5px;
-  border-radius: 3px;
-  background: var(--line);
-  min-width: 2px;
-}
-
-.latency-bar.low {
-  background: var(--green);
-}
-
-.latency-bar.medium {
-  background: var(--amber);
-}
-
-.latency-bar.high {
-  background: var(--red);
 }
 
 .plugin-latency-val {
@@ -1894,7 +1728,6 @@ select:focus-visible {
   }
 
   .connection-status,
-  .refresh-controls,
   .scan-controls {
     flex: 1 1 auto;
     min-width: 0;
@@ -1906,21 +1739,11 @@ select:focus-visible {
     justify-content: center;
   }
 
-  .dashboard-summary {
-    grid-template-columns: 1fr;
-  }
-
-  .info-card {
-    padding: 16px;
-    gap: 8px;
-  }
-
-  .info-card-value strong {
-    font-size: 26px;
-  }
-
-  .info-card-meta {
-    font-size: 12px;
+  .recording-verdict {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px 14px;
   }
 
   .diagnostics-row {
@@ -1980,9 +1803,7 @@ select:focus-visible {
 
   .plugin-main {
     grid-template-columns: minmax(0, 1fr) auto 36px;
-    grid-template-areas:
-      "info latency toggle"
-      "bar bar bar";
+    grid-template-areas: "info latency toggle";
     gap: 8px 10px;
     padding: 14px 16px;
   }
@@ -2236,9 +2057,6 @@ select:focus-visible {
 
 /* Respect prefers-reduced-motion */
 @media (prefers-reduced-motion: reduce) {
-  .toggle-switch .toggle-track,
-  .toggle-switch .toggle-track::before,
-  .interval-option,
   .scan-button,
   .view-toggle-button,
   .search-box input,
@@ -2258,7 +2076,6 @@ select:focus-visible {
   .onboarding-step.pending .step-icon,
   .shimmer-row,
   .status-pill.scanning .dot,
-  .status-pill.scanning-bg .dot,
   .skeleton-fade-enter,
   .skeleton-fade-exit,
   .plugin-row.highlight-flash {

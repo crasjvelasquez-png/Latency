@@ -1027,8 +1027,6 @@ def test_load_settings_default(isolated_settings):
 
 def test_load_settings_persistence(isolated_settings):
     custom = {
-        "auto_refresh": True,
-        "refresh_interval": 10,
         "grouping": "plugin",
         "workflow_mode": "custom_mode"
     }
@@ -1054,8 +1052,8 @@ def test_load_settings_invalid_values(isolated_settings):
 def test_api_get_settings(api_server, isolated_settings):
     status, payload = _http_json(api_server, "/api/settings")
     assert status == 200
-    assert payload["auto_refresh"] == app.DEFAULT_SETTINGS["auto_refresh"]
-    assert payload["refresh_interval"] == app.DEFAULT_SETTINGS["refresh_interval"]
+    assert "auto_refresh" not in payload
+    assert "refresh_interval" not in payload
     assert payload["grouping"] == app.DEFAULT_SETTINGS["grouping"]
     assert payload["workflow_mode"] == app.DEFAULT_SETTINGS["workflow_mode"]
 
@@ -1069,7 +1067,7 @@ def test_api_post_settings_update(api_server, isolated_settings):
         headers=headers
     )
     assert status == 200
-    assert payload["auto_refresh"] == app.DEFAULT_SETTINGS["auto_refresh"]
+    assert "auto_refresh" not in payload
 
     # Send actual updates
     status, payload = _http_json(
@@ -1080,16 +1078,14 @@ def test_api_post_settings_update(api_server, isolated_settings):
         data={"auto_refresh": True, "refresh_interval": 5, "grouping": "plugin"}
     )
     assert status == 200
-    assert payload["auto_refresh"] is True
-    assert payload["refresh_interval"] == 5
+    assert "auto_refresh" not in payload
+    assert "refresh_interval" not in payload
     assert payload["grouping"] == "plugin"
     assert payload["workflow_mode"] == "standard"
 
 
 def test_api_post_settings_reset(api_server, isolated_settings):
     custom = {
-        "auto_refresh": True,
-        "refresh_interval": 10,
         "grouping": "plugin",
         "workflow_mode": "custom"
     }
@@ -1324,5 +1320,4 @@ def test_generate_recommendations_safe_handling():
     assert "Plugin Inactive" in device_names
     assert "Plugin Unknown" in device_names
     assert "Plugin Zero" not in device_names
-
 
