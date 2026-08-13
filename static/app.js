@@ -1194,7 +1194,7 @@ function updatePluginRow(row, item, maxSessionSamples) {
   row.classList.toggle("bottleneck", Boolean(item.is_bottleneck));
 
   if (hasNumericValue(item.track_number)) {
-    const channelLabel = `${Number(item.track_number)}. Track #`;
+    const channelLabel = `${Number(item.track_number)}.`;
     const channelTitleHtml = `<span class="channel-number">${escapeHtml(channelLabel)}</span><span class="channel-name">${escapeHtml(name)}</span>`;
     if (nameEl.innerHTML !== channelTitleHtml) nameEl.innerHTML = channelTitleHtml;
   } else if (nameEl.textContent !== name) {
@@ -1312,7 +1312,7 @@ function pluginRows(report) {
     instance_count: plugin.instance_count || (plugin.instances || []).length,
     impact_score: Number(plugin.impact_score || 0),
     instances: plugin.instances || [],
-    details: { nameLabel: "Track name", numberLabel: "Track #" },
+    details: { nameLabel: "Track name", numberLabel: "Track" },
   }));
 }
 

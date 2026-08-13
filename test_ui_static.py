@@ -112,6 +112,14 @@ def test_report_is_channel_only_search_and_inspect():
     assert "b.latency_samples - a.latency_samples" in js_content
 
 
+def test_track_labels_do_not_render_literal_track_number_placeholder():
+    js_content = APP_JS.read_text()
+
+    assert "Track #" not in js_content
+    assert 'const channelLabel = `${Number(item.track_number)}.`' in js_content
+    assert 'numberLabel: "Track"' in js_content
+
+
 class WorkflowHtmlParser(HTMLParser):
     def __init__(self):
         super().__init__()
