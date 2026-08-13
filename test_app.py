@@ -336,9 +336,9 @@ def test_select_device_in_ableton_sends_nested_locator(monkeypatch):
                 "args": ("ok", 2, 3, 1, 0, 4, "Rack", "Chain A", "Pro-Q 3"),
             }
 
-    opened = []
+    handoffs = []
     monkeypatch.setattr(app, "OSCRequest", MockOSCRequest)
-    monkeypatch.setattr(app.subprocess, "Popen", lambda args, **kwargs: opened.append(args))
+    monkeypatch.setattr(app, "handoff_to_ableton", lambda: handoffs.append(True))
 
     result = app.select_device_in_ableton(
         2,
@@ -351,7 +351,17 @@ def test_select_device_in_ableton_sends_nested_locator(monkeypatch):
         "/live/view/select_device_path",
         (2, 3, 1, 0, 4, "Rack", "Chain A", "Pro-Q 3"),
     )]
-    assert opened == [["open", "-a", "Ableton Live"]]
+    assert handoffs == [True]
+
+
+def test_handoff_to_ableton_does_not_hide_browser_in_source_mode(monkeypatch):
+    opened = []
+    monkeypatch.setattr(app.subprocess, "Popen", lambda args, **kwargs: opened.append(args))
+    monkeypatch.delattr(app.sys, "frozen", raising=False)
+
+    app.handoff_to_ableton()
+
+    assert opened == [["osascript", "-e", 'tell application id "com.ableton.live" to activate']]
 
 
 def test_select_device_in_ableton_rejects_stale_response(monkeypatch):

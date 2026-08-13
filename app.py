@@ -1631,6 +1631,28 @@ def reload_abletonosc():
     OSCRequest(timeout=OSC_RELOAD_TIMEOUT).send("/live/api/reload")
 
 
+def handoff_to_ableton():
+    """Bring Live forward and hide the packaged Latency window."""
+    subprocess.Popen(
+        ["osascript", "-e", 'tell application id "com.ableton.live" to activate'],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # The browser-served development UI must not hide the user's browser. Only
+    # the packaged pywebview app owns an application window we should hide.
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        from AppKit import NSApplication
+        from PyObjCTools import AppHelper
+
+        application = NSApplication.sharedApplication()
+        AppHelper.callAfter(application.hide_, None)
+    except Exception as exc:
+        logger.warning("Could not move Latency behind Ableton Live: %s", exc)
+
+
 def select_device_in_ableton(track_index, device_locator, expected_path):
     if isinstance(track_index, bool) or not isinstance(track_index, int) or track_index < 0:
         raise ValueError("track_index must be a non-negative integer")
@@ -1673,7 +1695,7 @@ def select_device_in_ableton(track_index, device_locator, expected_path):
         error.code = "stale_scan"
         raise error
 
-    subprocess.Popen(["open", "-a", "Ableton Live"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    handoff_to_ableton()
     return {
         "ok": True,
         "track_index": track_index,
