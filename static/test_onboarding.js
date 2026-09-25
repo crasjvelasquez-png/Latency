@@ -278,9 +278,6 @@
           );
         }
 
-        // Verify that a focus-return target was recorded for the real session.
-        const triggerEl = window.__onboardingTest._lastTrigger;
-
         // Dismiss via Escape key
         onboarding.overlay.dispatchEvent(
           new KeyboardEvent("keydown", { key: "Escape", bubbles: true })

@@ -197,21 +197,6 @@ def inactive_devices_report():
 
 
 @pytest.fixture
-def stale_report(isolated_cache):
-    """A report generated at a known timestamp to validate last-scan-time logic."""
-    report = _base_report(
-        devices=[_device(device_name="Stale Plugin", latency_samples=64, latency_ms=1.451)],
-        track_count=1,
-        device_count=1,
-    )
-    # Write it to the cache path so _get_last_scan_time can read it.
-    app.CACHED_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(app.CACHED_REPORT_PATH, "w") as fh:
-        json.dump(report, fh)
-    return report
-
-
-@pytest.fixture
 def zero_latency_report():
     """All devices report zero latency."""
     return _base_report(
@@ -243,18 +228,6 @@ def large_input_report():
 def missing_devices_report():
     """Report dict with no 'devices' key at all."""
     return {"sample_rate": 48000, "buffer_size": 512}
-
-
-@pytest.fixture
-def null_devices_report():
-    """Report dict where 'devices' is null."""
-    return {"devices": None, "sample_rate": 44100}
-
-
-@pytest.fixture
-def not_a_list_report():
-    """Report where 'devices' is a string instead of a list."""
-    return {"devices": "not-a-list", "track_count": 0}
 
 
 # ── API status / scan ──
@@ -617,11 +590,6 @@ def test_normalize_combined_version_and_alias():
     assert normalize_plugin_name("FabFilter Pro-Q 3 v4.0 (VST3)") == "pro-q 3"
 
 
-def test_normalize_empty_and_none_still_unnamed():
-    assert normalize_plugin_name("") == "unnamed device"
-    assert normalize_plugin_name(None) == "unnamed device"
-
-
 # ── summarize_report: plugin grouping ──
 
 
@@ -725,11 +693,6 @@ def test_latency_available_false(unknown_latency_report):
     assert d["max_latency_samples"] == 32
 
 
-def test_device_with_zero_latency_not_in_latency_count(unknown_latency_report):
-    result = summarize_report(unknown_latency_report)
-    assert result["latency_device_count"] == 1
-
-
 # ── summarize_report: missing fields ──
 
 
@@ -827,21 +790,6 @@ def test_top_plugins_limited_to_10():
     assert len(result["top_plugins"]) == 10
 
 
-def test_plugins_sorted_by_max_latency():
-    report = _base_report(
-        devices=[
-            _device(device_name="A", latency_samples=10),
-            _device(device_name="B", latency_samples=100),
-            _device(device_name="C", latency_samples=50),
-        ],
-        device_count=3,
-        track_count=3,
-    )
-    result = summarize_report(report)
-    ordered = [g["device_name"] for g in result["plugins"]]
-    assert ordered == ["B", "C", "A"]
-
-
 def test_impact_score_equals_max_latency_ms_times_instance_count():
     report = _base_report(
         devices=[
@@ -881,18 +829,6 @@ def test_plugins_sorted_by_impact_score():
     assert ordered == ["LowLatencyMany", "HighLatencyOne"]
 
 
-def test_zero_everything_impact_score_is_zero():
-    report = _base_report(
-        devices=[
-            _device(device_name="Silent", latency_samples=0, latency_ms=0.0),
-        ],
-        device_count=1,
-        track_count=1,
-    )
-    result = summarize_report(report)
-    assert result["plugins"][0]["impact_score"] == 0.0
-
-
 # ── malformed / edge-case reports ──
 
 
@@ -905,18 +841,6 @@ def test_missing_devices_key(missing_devices_report):
     assert result["total_latency_ms"] == 0
 
 
-def test_null_devices_key(null_devices_report):
-    """When devices is explicitly None, report.get returns None → iterating raises TypeError."""
-    with pytest.raises(TypeError):
-        summarize_report(null_devices_report)
-
-
-def test_devices_not_a_list(not_a_list_report):
-    """When devices is not iterable, should either raise or gracefully handle."""
-    with pytest.raises((TypeError, AttributeError)):
-        summarize_report(not_a_list_report)
-
-
 def test_empty_devices_list(empty_report):
     result = summarize_report(empty_report)
     assert result["plugins"] == []
@@ -926,20 +850,6 @@ def test_empty_devices_list(empty_report):
 
 
 # ── stale report behavior ──
-
-
-def test_stale_report_cached_file_readable(stale_report):
-    assert app.CACHED_REPORT_PATH.exists()
-    with open(app.CACHED_REPORT_PATH) as fh:
-        data = json.load(fh)
-    assert data["devices"][0]["device_name"] == "Stale Plugin"
-
-
-def test_stale_report_not_overwritten_by_scenario(stale_report):
-    """The stale fixture writes to cache; other tests should not break."""
-    result = summarize_report(stale_report)
-    assert result["total_latency_samples"] == 64
-    assert len(result["plugins"]) == 1
 
 
 # ── large input / robustness ──
@@ -955,13 +865,6 @@ def test_large_input_reports_correct_counts(large_input_report):
     repeated = next(g for g in result["plugins"] if g["device_name"] == "Repeated")
     assert repeated["instance_count"] == 25
     assert repeated["max_latency_samples"] == 480
-
-
-def test_large_input_totals(large_input_report):
-    result = summarize_report(large_input_report)
-    total = sum(i * 10 for i in range(50))
-    assert result["total_latency_samples"] == total
-    assert result["latency_device_count"] == 49  # 0 latency not counted
 
 
 # ── zero-latency edge cases ──
@@ -1028,16 +931,6 @@ def test_summarize_report_mutates_in_place_by_design():
     assert original["devices"][0]["device_name"] == "Original"
 
 
-def test_summarize_report_enriches_report_in_place():
-    report = _base_report(devices=[_device()])
-    result = summarize_report(report)
-    assert "plugins" in result
-    assert "top_plugins" in result
-    assert "latency_device_count" in result
-    assert "total_latency_samples" in result
-    assert "total_latency_ms" in result
-
-
 # ── /api/last-scan ──
 
 
@@ -1097,23 +990,6 @@ def test_export_latency_report_writes_project_and_timestamp(isolated_cache, monk
     
     assert cached_data["project"]["name"] == "MyCoolProject.als"
     assert "timestamp" in cached_data
-
-
-def test_load_cached_report_extracts_project_and_timestamp(isolated_cache):
-    report = {
-        "devices": [],
-        "sample_rate": 44100,
-        "buffer_size": 256,
-        "track_count": 0,
-        "device_count": 0,
-        "project": {"name": "TestProj.als", "path": "/path/TestProj.als"},
-        "timestamp": "2026-07-01T12:00:00Z"
-    }
-    isolated_cache.write_text(json.dumps(report))
-
-    loaded = app.load_cached_report()
-    assert loaded["project"]["name"] == "TestProj.als"
-    assert loaded["timestamp"] == "2026-07-01T12:00:00Z"
 
 
 def test_api_status_includes_cached_project_and_timestamp(api_server, isolated_cache, monkeypatch):

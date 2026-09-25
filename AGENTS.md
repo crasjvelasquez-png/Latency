@@ -13,6 +13,11 @@
 - Reload AbletonOSC handlers after installing/updating this tool: `python3 app.py --reload-abletonosc`.
 - Focused syntax check: `python3 -m py_compile app.py`.
 
+## Testing Rules
+- Never write unit tests after you write code.
+- Highly prefer E2E tests as the sole testing mechanism. Use them to verify complex features work. At the end of E2E tests, produce a verifiable and repeatable artifact.
+- If you must test a system in isolation, first write down all the ways it could fail, then write the code.
+
 ## Runtime Gotchas
 - `/api/scan` requires Ableton Live running with AbletonOSC enabled; without it, expect timeout/offline errors rather than app failures.
 - Scan export is read from `/tmp/abletonosc-latency-report.json` unless AbletonOSC returns another path.
