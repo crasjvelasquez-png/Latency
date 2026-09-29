@@ -1,22 +1,21 @@
 :root {
-  --bg: #0a0b0d;
-  --panel-bg: #111215;
-  --card-bg: #16181c;
-  --card-border: rgba(255, 255, 255, 0.06);
+  --bg: #0e1012;
+  --panel-bg: #14171a;
+  --card-bg: #1b1e22;
+  --card-border: #30353b;
   --text: #f0f0f0;
   --muted: #9a9ea6;
   --dim: #8b8f96;
   --line: #22252a;
   --amber: #f0b732;
-  --red: #e5484d;
+  --red: #f0787d;
   --green: #3ecf8e;
-  --radius: 10px;
+  --radius: 12px;
   --radius-sm: 6px;
   --dur-fast: 120ms;
   --dur-base: 200ms;
   --dur-slow: 320ms;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 * {
@@ -39,10 +38,17 @@ body {
   display: none !important;
 }
 
+/* Honor application state even when component rules set display. */
+[hidden] { display: none !important; }
+
+::selection { background: #f0b732; color: #0e1012; }
+html { color-scheme: dark; scrollbar-color: #454b53 var(--bg); }
+input { caret-color: var(--amber); }
+
 /* Focus */
 :focus-visible {
-  outline: 2px solid transparent;
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.45);
+  outline: 2px solid var(--amber);
+  outline-offset: 3px;
 }
 
 button:focus-visible,
@@ -149,7 +155,7 @@ select:focus-visible {
 .app-shell {
   width: min(1120px, calc(100vw - 48px));
   margin: 0 auto;
-  padding: 32px 0 60px;
+  padding: 40px 0 60px;
 }
 
 .app-shell[aria-hidden="true"] {
@@ -162,7 +168,9 @@ select:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  margin-bottom: 32px;
+  margin-bottom: 24px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--line);
 }
 
 .logo-area {
@@ -172,8 +180,9 @@ select:focus-visible {
 }
 
 .app-icon {
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
   background: var(--card-bg);
   border: 1px solid var(--card-border);
   border-radius: var(--radius-sm);
@@ -344,36 +353,28 @@ select:focus-visible {
   contain-intrinsic-size: 0 300px;
 }
 
-/* ── Recording verdict ── */
+/* ── Session measurements ── */
 .recording-verdict {
-  min-height: 48px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 0 16px;
-  background: var(--card-bg);
+  display: grid;
+  grid-template-columns: 1fr 1.35fr 1fr;
+  padding: 26px 28px;
+  background: var(--panel-bg);
+  border: 1px solid var(--card-border);
   border-radius: var(--radius);
-  margin-bottom: 24px;
+  margin-bottom: 32px;
 }
 
-.recording-verdict-line {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 14px;
-}
-
-.recording-verdict-line strong {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.verdict-separator {
-  color: var(--dim);
-}
+.recording-verdict > div { min-width: 0; }
+.recording-verdict > div + div { border-left: 1px solid var(--line); padding-left: 28px; }
+.recording-verdict h2 { font-size: 13px; font-weight: 500; color: var(--muted); margin-bottom: 12px; }
+.verdict-value { display: flex; align-items: baseline; gap: 8px; }
+.verdict-value strong { font-size: 36px; line-height: 1.15; letter-spacing: -0.03em; font-weight: 500; }
+.verdict-value:has(strong[hidden]) { display: none; }
+.verdict-unit { font-size: 13px; color: var(--muted); }
+.verdict-track > strong { display: block; font-size: 21px; font-weight: 500; overflow-wrap: anywhere; }
+.verdict-track .highlight-action-link { display: inline-flex; align-items: center; gap: 5px; margin-top: 8px; }
+.verdict-track .icon-chevron { width: 12px; height: 12px; }
+.verdict-value, .plugin-latency-val, .track-latency, .channel-number { font-variant-numeric: tabular-nums; }
 
 /* ── Diagnostics ── */
 .diagnostics-panel {
@@ -558,9 +559,7 @@ select:focus-visible {
 
 /* ── Panel ── */
 .report-panel {
-  background: var(--panel-bg);
-  border-radius: var(--radius);
-  padding: 24px;
+  padding: 0;
 }
 
 .panel-header {
@@ -568,7 +567,7 @@ select:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 24px;
+  margin-bottom: 18px;
   flex-wrap: wrap;
 }
 
@@ -649,7 +648,7 @@ select:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 20px;
+  margin-bottom: 0;
   flex-wrap: wrap;
 }
 
@@ -675,8 +674,8 @@ select:focus-visible {
 }
 
 .search-box input {
-  height: 34px;
-  width: 240px;
+  height: 40px;
+  width: 280px;
   padding: 0 12px 0 32px;
   background: var(--card-bg);
   border: 1px solid var(--card-border);
@@ -787,8 +786,8 @@ select:focus-visible {
 }
 
 .show-all-label:focus-within .check-box {
-  outline: 2px solid transparent;
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.45);
+  outline: 2px solid var(--amber);
+  outline-offset: 3px;
 }
 
 .row-count {
@@ -917,11 +916,14 @@ select:focus-visible {
 .results {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 0;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  background: var(--panel-bg);
 }
 
 .results.empty {
-  min-height: 220px;
+  min-height: 280px;
   display: grid;
   place-items: center;
 }
@@ -946,24 +948,23 @@ select:focus-visible {
 }
 
 .plugin-row {
-  border: 1px solid var(--card-border);
-  border-radius: var(--radius);
-  background: var(--card-bg);
-  transition: border-color var(--dur-fast);
-  will-change: transform, opacity;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  transition: background var(--dur-fast);
 }
 
 .plugin-row.flip-animating {
   pointer-events: none;
 }
 
-.plugin-row:hover {
-  border-color: rgba(255, 255, 255, 0.1);
-}
+.plugin-row:last-child { border-bottom: 0; }
+.plugin-row:first-child { border-radius: var(--radius) var(--radius) 0 0; }
+.plugin-row:last-child { border-radius: 0 0 var(--radius) var(--radius); }
+.plugin-row:only-child { border-radius: var(--radius); }
+.plugin-row:hover { background: var(--card-bg); }
 
 .plugin-row.bottleneck {
-  border-color: rgba(240, 183, 50, 0.65);
-  box-shadow: inset 3px 0 0 var(--amber);
+  background: #24221b;
 }
 
 .plugin-main {
@@ -989,7 +990,9 @@ select:focus-visible {
 }
 
 .plugin-name {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   font-size: 14px;
   font-weight: 500;
   color: var(--text);
@@ -1008,11 +1011,17 @@ select:focus-visible {
 }
 
 .plugin-name .channel-number {
-  font-weight: 700;
+  min-width: 28px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
 }
+.plugin-info:has(.channel-number) .plugin-tracks { padding-left: 38px; }
 
 .plugin-name .channel-name {
   font-weight: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .plugin-latency-val {
@@ -1032,7 +1041,7 @@ select:focus-visible {
 }
 
 .latency-unit {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted);
   font-weight: 400;
 }
@@ -1110,7 +1119,7 @@ select:focus-visible {
 .track-item {
   padding: 8px 0;
   font-size: 13px;
-  border-bottom: 1px dashed var(--line);
+  border-bottom: 1px solid var(--line);
 }
 
 .track-item:last-child {
@@ -1782,10 +1791,9 @@ select:focus-visible {
   }
 
   .recording-verdict {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 6px;
-    padding: 12px 14px;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    padding: 20px;
   }
 
   .diagnostics-row {
@@ -1797,9 +1805,12 @@ select:focus-visible {
     padding: 20px;
   }
 
-  .report-panel {
-    padding: 20px;
-  }
+  .report-panel { padding: 0; }
+  .verdict-track { grid-column: 1 / -1; grid-row: 2; }
+  .recording-verdict > .verdict-track { border-left: 0; border-top: 1px solid var(--line); padding: 16px 0 0; }
+  .recording-verdict > .verdict-buffer { padding-left: 20px; }
+  .verdict-value strong { font-size: 30px; }
+  .report-toolbar { width: 100%; }
 
   .panel-header {
     flex-direction: column;
@@ -1886,8 +1897,9 @@ select:focus-visible {
 
 @media (max-width: 480px) {
   .header-actions {
-    flex-direction: column;
-    align-items: stretch;
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: nowrap;
   }
 
   .scan-button {
@@ -1927,7 +1939,6 @@ select:focus-visible {
     padding: 12px 14px;
   }
 
-  .report-panel,
   .recommendations-panel {
     padding: 16px;
   }
@@ -1960,8 +1971,8 @@ select:focus-visible {
 }
 
 .latency-disclosure-summary:focus-visible {
-  outline: 2px solid transparent;
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.45);
+  outline: 2px solid var(--amber);
+  outline-offset: 3px;
   border-radius: var(--radius-sm);
 }
 
@@ -2077,17 +2088,18 @@ select:focus-visible {
 .status-banner {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 8px;
-  padding: 10px 16px;
-  background: rgba(255, 255, 255, 0.03);
+  padding: 10px 0;
+  background: transparent;
   border: 1px solid var(--card-border);
   border-radius: var(--radius);
   color: var(--muted);
   font-size: 13px;
   font-weight: 500;
   margin-bottom: 16px;
-  text-align: center;
+  text-align: left;
+  border: 0;
 }
 
 .status-banner .dot {
@@ -2682,7 +2694,7 @@ select:focus-visible {
 .danger-zone h3 {
   font-size: 14px;
   font-weight: 500;
-  color: var(--red);
+  color: var(--text);
 }
 
 .settings-actions {
@@ -2737,4 +2749,13 @@ select:focus-visible {
   .settings-btn {
     width: 100%;
   }
+}
+
+@media (max-width: 720px) {
+  .scan-button, .header-icon-button, .modal-close-button, .onboarding-btn { min-height: 44px; }
+  .header-icon-button, .modal-close-button { min-width: 44px; }
+  .search-box input { font-size: 16px; }
+  .track-name-main { flex-wrap: wrap; }
+  .track-name-text, .plugin-instance-name { max-width: 100%; }
+  .status-pill { padding: 0 10px; white-space: nowrap; }
 }

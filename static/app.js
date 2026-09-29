@@ -136,7 +136,7 @@ let tweenFrameId = null;
 // ── Virtualization ──
 
 const VIRTUAL_ROW_HEIGHT = 72;
-const VIRTUAL_ROW_GAP = 12;
+const VIRTUAL_ROW_GAP = 0;
 const VIRTUAL_BUFFER = 5;
 
 const virtual = {
@@ -515,21 +515,14 @@ function stopTween(el) {
   activeTweens.delete(el);
 }
 
-const CROSSFADE_MS = 150;
-
 function revealContent(contentEls, skeletonEls) {
   const contentArr = Array.isArray(contentEls) ? contentEls : [contentEls];
   const skeletonArr = Array.isArray(skeletonEls) ? skeletonEls : [skeletonEls];
 
   skeletonArr.forEach((el) => {
     if (!el) return;
-    el.style.transition = `opacity ${CROSSFADE_MS}ms ease`;
-    el.style.opacity = "0";
-    el.addEventListener("transitionend", () => {
-      el.hidden = true;
-      el.style.opacity = "";
-      el.style.transition = "";
-    }, { once: true });
+    // Completion must not depend on animation events (offscreen or reduced motion).
+    el.hidden = true;
   });
 
   contentArr.forEach((el) => {
@@ -1025,13 +1018,10 @@ function updateDashboardStats(report) {
     d.bufferSize.textContent = "--";
   }
 
-  const anyValueVisible = hasLatency || hasNumericValue(report.buffer_size);
-  if (anyValueVisible) {
-    revealContent(
-      [d.totalLatencyMs, d.bufferSize],
-      [d.latencySkeleton, d.bufferSkeleton]
-    );
-  }
+  revealContent(
+    [d.totalLatencyMs, d.bufferSize],
+    [d.latencySkeleton, d.bufferSkeleton]
+  );
 }
 
 function getRecommendationIconSvg(type) {
@@ -1194,7 +1184,7 @@ function updatePluginRow(row, item, maxSessionSamples) {
   row.classList.toggle("bottleneck", Boolean(item.is_bottleneck));
 
   if (hasNumericValue(item.track_number)) {
-    const channelLabel = `${Number(item.track_number)}.`;
+    const channelLabel = String(Number(item.track_number)).padStart(2, "0");
     const channelTitleHtml = `<span class="channel-number">${escapeHtml(channelLabel)}</span><span class="channel-name">${escapeHtml(name)}</span>`;
     if (nameEl.innerHTML !== channelTitleHtml) nameEl.innerHTML = channelTitleHtml;
   } else if (nameEl.textContent !== name) {
