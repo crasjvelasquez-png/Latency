@@ -411,6 +411,105 @@ def _get_coreaudio_buffer_size():
     return None
 
 
+
+_performance_cache = {
+    "timestamp": 0,
+    "payload": None,
+    "lock": threading.Lock(),
+}
+PERFORMANCE_CACHE_TTL = 1.0  # seconds
+
+
+def get_live_performance():
+    now = time.time()
+    with _performance_cache["lock"]:
+        if (
+            _performance_cache["payload"] is not None
+            and (now - _performance_cache["timestamp"]) < PERFORMANCE_CACHE_TTL
+        ):
+            return _performance_cache["payload"]
+
+        if not ableton_running():
+            payload = {
+                "available": False,
+                "reason": "live_offline",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "source": "Ableton Live Track.performance_impact",
+                "unit": "ratio_0_to_1",
+                "tracks": [],
+                "highest_cpu_track": None,
+                "plugins_supported": False,
+                "plugins_message": "Per-plugin CPU unavailable (Ableton Live LOM only exposes track-level performance impact)",
+            }
+            _performance_cache["payload"] = payload
+            _performance_cache["timestamp"] = now
+            return payload
+
+        try:
+            resp = OSCRequest(timeout=1.5).send("/live/song/get/track_performance")
+            args = resp.get("args", ()) if isinstance(resp, dict) else ()
+            tracks = []
+            highest_track = None
+
+            latest = load_cached_report() or {}
+            track_name_map = {}
+            for t in latest.get("tracks", []):
+                if isinstance(t, dict) and "index" in t:
+                    track_name_map[t["index"]] = t.get("name")
+
+            for i in range(0, len(args), 2):
+                t_idx = args[i]
+                perf_val = args[i + 1] if i + 1 < len(args) else -1.0
+                if isinstance(perf_val, (int, float)) and perf_val >= 0:
+                    cpu_pct = round(float(perf_val) * 100.0, 1)
+                    val = float(perf_val)
+                else:
+                    cpu_pct = None
+                    val = None
+
+                track_entry = {
+                    "track_index": t_idx,
+                    "track_name": track_name_map.get(t_idx, f"Track {t_idx + 1}"),
+                    "performance_impact": val,
+                    "cpu_percent": cpu_pct,
+                }
+                tracks.append(track_entry)
+                if val is not None and val > 0:
+                    if highest_track is None or val > (highest_track.get("performance_impact") or -1):
+                        highest_track = track_entry
+
+            payload = {
+                "available": True,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "source": "Ableton Live Track.performance_impact",
+                "unit": "ratio_0_to_1",
+                "tracks": tracks,
+                "highest_cpu_track": highest_track,
+                "plugins_supported": False,
+                "plugins_message": "Per-plugin CPU unavailable (Ableton Live LOM only exposes track-level performance impact)",
+            }
+            _performance_cache["payload"] = payload
+            _performance_cache["timestamp"] = now
+            return payload
+        except Exception as exc:
+            logger.debug("Failed to query live performance from AbletonOSC: %s", exc)
+            payload = {
+                "available": False,
+                "reason": "osc_unreachable",
+                "error": str(exc),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "source": "Ableton Live Track.performance_impact",
+                "unit": "ratio_0_to_1",
+                "tracks": [],
+                "highest_cpu_track": None,
+                "plugins_supported": False,
+                "plugins_message": "Per-plugin CPU unavailable (Ableton Live LOM only exposes track-level performance impact)",
+            }
+            _performance_cache["payload"] = payload
+            _performance_cache["timestamp"] = now
+            return payload
+
+
 def export_latency_report():
     before_time = time.time()
     response = OSCRequest(timeout=OSC_EXPORT_TIMEOUT).send("/live/song/export/latency")
@@ -829,6 +928,19 @@ def annotate_track_kinds(report):
 
 def summarize_report(report):
     annotate_track_kinds(report)
+    raw_tracks = report.get("tracks", [])
+    tracks_by_idx = {}
+    for t in raw_tracks:
+        idx = t.get("index")
+        if idx is not None:
+            perf = t.get("performance_impact")
+            if perf is not None and isinstance(perf, (int, float)) and perf >= 0:
+                t["cpu_percent"] = round(float(perf) * 100.0, 1)
+                t["performance_impact"] = float(perf)
+            else:
+                t["cpu_percent"] = None
+            tracks_by_idx[idx] = t
+
     groups = {}
     devices = report.get("devices", [])
     for device in devices:
@@ -849,6 +961,9 @@ def summarize_report(report):
                 "active_count": 0,
                 "unknown_active_count": 0,
                 "latency_available": False,
+                "cpu_available": False,
+                "cpu_message": "Per-plugin CPU unavailable in Ableton Live API",
+                "performance_impact": None,
                 "tracks": [],
                 "instances": [],
             },
@@ -881,6 +996,9 @@ def summarize_report(report):
             instance["track_number"] = int(device.get("track_index")) + 1
         except (TypeError, ValueError):
             instance["track_number"] = None
+        instance["performance_impact"] = device.get("performance_impact")
+        instance["cpu_available"] = False
+        instance["cpu_message"] = "Per-plugin CPU unavailable in Ableton Live API"
         if track_label not in group["tracks"]:
             group["tracks"].append(track_label)
         group["instances"].append(instance)
@@ -913,6 +1031,9 @@ def summarize_report(report):
     tracks = {}
     for device in devices:
         track_index = device.get("track_index")
+        raw_track = tracks_by_idx.get(track_index, {})
+        perf = raw_track.get("performance_impact")
+        cpu_pct = raw_track.get("cpu_percent")
         key = (str(track_index), device.get("track_name") or "Unnamed Track")
         summary = tracks.setdefault(key, {
             "track_name": device.get("track_name") or "Unnamed Track",
@@ -922,6 +1043,8 @@ def summarize_report(report):
             "total_latency_samples": 0,
             "total_latency_ms": 0,
             "device_count": 0,
+            "performance_impact": perf,
+            "cpu_percent": cpu_pct,
             "is_bottleneck": False,
         })
         summary["total_latency_samples"] += int(device.get("latency_samples") or 0)
@@ -940,6 +1063,24 @@ def summarize_report(report):
         bottleneck["is_bottleneck"] = True
     report["tracks_summary"] = tracks_summary
     report["bottleneck_track"] = dict(bottleneck) if bottleneck else None
+
+    highest_cpu = None
+    all_candidates = list(tracks.values())
+    for t in raw_tracks:
+        if t.get("performance_impact") is not None and isinstance(t.get("performance_impact"), (int, float)):
+            all_candidates.append({
+                "track_index": t.get("index"),
+                "track_name": t.get("name") or "Unnamed Track",
+                "performance_impact": t.get("performance_impact"),
+                "cpu_percent": t.get("cpu_percent"),
+            })
+    for item in all_candidates:
+        perf = item.get("performance_impact")
+        if perf is not None and isinstance(perf, (int, float)) and perf > 0:
+            if highest_cpu is None or perf > (highest_cpu.get("performance_impact") or -1):
+                highest_cpu = item
+
+    report["highest_cpu_track"] = dict(highest_cpu) if highest_cpu else None
     report["pdc_latency_samples"] = bottleneck["total_latency_samples"] if bottleneck else 0
     report["pdc_latency_ms"] = bottleneck["total_latency_ms"] if bottleneck else 0
     report["recommendations"] = generate_recommendations(report)
@@ -1479,8 +1620,12 @@ class Handler(SimpleHTTPRequestHandler):
                     "/api/last-scan",
                     "/api/settings",
                     "/api/select-device",
+                    "/api/performance",
                 ],
             })
+            return
+        if path == "/api/performance" or path == "/api/cpu":
+            self.write_json(200, get_live_performance())
             return
         if path == "/api/status":
             self.write_json(200, build_status_payload(include_cached_report=True))

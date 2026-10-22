@@ -922,7 +922,7 @@ def test_summarize_report_mutates_in_place_by_design():
         "plugins", "top_plugins", "latency_device_count",
         "total_latency_samples", "total_latency_ms",
         "cumulative_latency_samples", "cumulative_latency_ms",
-        "tracks_summary", "bottleneck_track",
+        "tracks_summary", "bottleneck_track", "highest_cpu_track",
         "pdc_latency_samples", "pdc_latency_ms", "recommendations",
         "signal_path",
     }
@@ -1315,3 +1315,103 @@ def test_generate_recommendations_safe_handling():
     assert "Plugin Inactive" in device_names
     assert "Plugin Unknown" in device_names
     assert "Plugin Zero" not in device_names
+
+
+def test_summarize_report_backward_compatibility_no_performance_impact():
+    report = _base_report(
+        tracks=[{"index": 0, "name": "Track 1"}],
+        devices=[_device(track_name="Track 1", track_index=0)],
+    )
+    result = summarize_report(report)
+    assert result.get("highest_cpu_track") is None
+    for track in result["tracks_summary"]:
+        assert track.get("performance_impact") is None
+        assert track.get("cpu_percent") is None
+    for plugin in result["plugins"]:
+        assert plugin.get("cpu_available") is False
+        assert "unavailable" in plugin.get("cpu_message", "").lower()
+
+
+def test_summarize_report_with_performance_impact():
+    report = _base_report(
+        tracks=[
+            {"index": 0, "name": "Track 1", "performance_impact": 0.042},
+            {"index": 1, "name": "Track 2", "performance_impact": 0.158},
+        ],
+        devices=[
+            _device(track_name="Track 1", track_index=0, latency_samples=100),
+            _device(track_name="Track 2", track_index=1, latency_samples=50),
+        ],
+    )
+    result = summarize_report(report)
+    assert result["highest_cpu_track"] is not None
+    assert result["highest_cpu_track"]["track_index"] == 1
+    assert result["highest_cpu_track"]["cpu_percent"] == 15.8
+
+    tracks_by_index = {t["track_index"]: t for t in result["tracks_summary"]}
+    assert tracks_by_index[0]["cpu_percent"] == 4.2
+    assert tracks_by_index[1]["cpu_percent"] == 15.8
+
+    for plugin in result["plugins"]:
+        assert plugin["cpu_available"] is False
+        assert "unavailable" in plugin["cpu_message"].lower()
+
+
+def test_api_performance_live_offline(api_server, monkeypatch):
+    monkeypatch.setattr(app, "ableton_running", lambda: False)
+    status, payload = _http_json(api_server, "/api/performance")
+    assert status == 200
+    assert payload["available"] is False
+    assert payload["reason"] == "live_offline"
+    assert payload["plugins_supported"] is False
+    assert "unavailable" in payload["plugins_message"].lower()
+
+
+def test_api_performance_live_online_with_osc_response(api_server, monkeypatch):
+    monkeypatch.setattr(app, "ableton_running", lambda: True)
+    app._performance_cache["timestamp"] = 0
+    app._performance_cache["payload"] = None
+
+    class MockOSCRequest:
+        def __init__(self, timeout=3.0):
+            pass
+        def send(self, address, *args):
+            if address == "/live/song/get/track_performance":
+                return {"address": address, "args": (0, 0.035, 1, 0.125)}
+            raise RuntimeError(f"Unexpected OSC address {address}")
+
+    monkeypatch.setattr(app, "OSCRequest", MockOSCRequest)
+    status, payload = _http_json(api_server, "/api/performance")
+    assert status == 200
+    assert payload["available"] is True
+    assert len(payload["tracks"]) == 2
+    assert payload["tracks"][0]["track_index"] == 0
+    assert payload["tracks"][0]["cpu_percent"] == 3.5
+    assert payload["tracks"][1]["track_index"] == 1
+    assert payload["tracks"][1]["cpu_percent"] == 12.5
+    assert payload["highest_cpu_track"]["track_index"] == 1
+    assert payload["highest_cpu_track"]["cpu_percent"] == 12.5
+    assert payload["plugins_supported"] is False
+
+
+def test_api_performance_caching(api_server, monkeypatch):
+    monkeypatch.setattr(app, "ableton_running", lambda: True)
+    app._performance_cache["timestamp"] = 0
+    app._performance_cache["payload"] = None
+
+    query_count = 0
+    class MockOSCRequest:
+        def __init__(self, timeout=3.0):
+            pass
+        def send(self, address, *args):
+            nonlocal query_count
+            query_count += 1
+            return {"address": address, "args": (0, 0.05)}
+
+    monkeypatch.setattr(app, "OSCRequest", MockOSCRequest)
+    s1, p1 = _http_json(api_server, "/api/performance")
+    s2, p2 = _http_json(api_server, "/api/performance")
+    assert s1 == 200 and s2 == 200
+    assert query_count == 1
+    assert p1["tracks"][0]["cpu_percent"] == 5.0
+    assert p2["tracks"][0]["cpu_percent"] == 5.0

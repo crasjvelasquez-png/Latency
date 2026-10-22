@@ -56,7 +56,8 @@
   function trackDetails(rows, { nameLabel = "Track name", numberLabel = "", formatLatency, showTrackKind = false } = {}) {
     const fmtMs = formatLatency || ((value) => String(value));
     const hasNumberCol = Boolean(numberLabel);
-    const colClass = hasNumberCol ? "" : " three-col";
+    const colClass = hasNumberCol ? " with-number" : "";
+    const isPluginList = nameLabel.toLowerCase().includes("plug");
     const body = rows
       .slice()
       .sort((a, b) => Number(b.latency_samples || 0) - Number(a.latency_samples || 0))
@@ -86,8 +87,17 @@
               aria-label="Show ${escapeHtml(displayName)} in Ableton Live"
               title="Show in Ableton Live">${escapeHtml(displayName)}</button>`
           : `<span class="track-name-text">${escapeHtml(displayName)}</span>`;
+
+        let cpuCell = "";
+        if (isPluginList) {
+          cpuCell = `<div class="track-cpu"><span class="plugin-cpu-na" title="Per-plugin CPU is not exposed by Ableton Live's API. Track CPU is shown in the channel header.">N/A*</span></div>`;
+        } else {
+          const cpuVal = inst.cpu_percent !== undefined && inst.cpu_percent !== null ? `${inst.cpu_percent}%` : "--";
+          cpuCell = `<div class="track-cpu"><span class="plugin-cpu-na" title="Track performance impact">${escapeHtml(cpuVal)}</span></div>`;
+        }
+
         return `
-          <div class="track-item${colClass}">
+          <div class="track-item has-cpu${colClass}">
             <div class="track-name">
               <div class="track-name-main">
                 ${nameControl}
@@ -99,6 +109,7 @@
             <div class="track-type">
               <span class="track-type-badge" title="${typeTitle}">${escapeHtml(fmt || "--")}</span>
             </div>
+            ${cpuCell}
             <div class="track-latency">
               ${escapeHtml(fmtMs(inst.latency_ms))} ms${inst._delta_html || ""}
             </div>
@@ -106,14 +117,19 @@
       })
       .join("");
 
+    const footnote = isPluginList
+      ? `<div class="track-cpu-footnote">* Ableton Live exposes track-level CPU telemetry, but per-plugin CPU metrics are not exposed in the Live Object Model API.</div>`
+      : "";
+
     return `
-      <div class="track-details-header${colClass}">
+      <div class="track-details-header has-cpu${colClass}">
         <span class="header-name">${escapeHtml(nameLabel)}</span>
         ${hasNumberCol ? `<span class="header-number">${escapeHtml(numberLabel)}</span>` : ""}
         <span class="header-type">Type</span>
+        <span class="header-cpu">CPU</span>
         <span class="header-latency">Latency</span>
       </div>
-      ${body}`;
+      ${body}${footnote}`;
   }
 
   window.LatencyComponents = {

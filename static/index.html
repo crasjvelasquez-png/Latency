@@ -66,6 +66,11 @@
           <strong id="bottleneckTrack">Finding bottleneck…</strong>
           <button id="highlightBottleneck" class="highlight-action-link" type="button" hidden>Highlight in report <span class="icon-chevron" aria-hidden="true"></span></button>
         </div>
+        <div class="verdict-cpu">
+          <h2>Peak CPU channel</h2>
+          <div class="verdict-value"><strong id="peakCpuTrack" hidden>--</strong><span class="verdict-unit" id="peakCpuPct"></span></div>
+          <span id="cpuSkeleton" class="skeleton skeleton-value" aria-hidden="true"></span>
+        </div>
         <div class="verdict-buffer">
           <h2>Audio buffer</h2>
           <div class="verdict-value"><strong id="bufferSize" hidden>--</strong><span class="verdict-unit">samples</span></div>
@@ -136,6 +141,15 @@
           </div>
         </div>
         <div class="report-toolbar" id="reportToolbar" hidden>
+          <div class="sort-selector" id="sortSelector" role="group" aria-label="Sort channels">
+            <span class="sort-label">Sort:</span>
+            <button type="button" class="sort-btn active" id="sortLatencyBtn" data-sort="latency">Latency</button>
+            <button type="button" class="sort-btn" id="sortCpuBtn" data-sort="cpu">CPU</button>
+          </div>
+          <button type="button" class="cpu-monitor-toggle" id="cpuMonitorToggle" aria-pressed="false" title="Toggle live CPU telemetry from Ableton Live">
+            <span class="cpu-monitor-dot" aria-hidden="true"></span>
+            <span class="cpu-monitor-label">Live CPU</span>
+          </button>
           <div class="search-box">
             <span class="icon-search" aria-hidden="true"></span>
             <input type="text" id="searchInput" placeholder="Filter by track or plug-in…" aria-label="Filter channels" autocomplete="off" spellcheck="false">

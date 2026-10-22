@@ -46,11 +46,22 @@ function getDom() {
     settingsCloseButton: $("settingsCloseButton"),
     btnResetOnboarding: $("btnResetOnboarding"),
     deviceSelectionStatus: $("deviceSelectionStatus"),
+    peakCpuTrack: $("peakCpuTrack"),
+    peakCpuPct: $("peakCpuPct"),
+    cpuSkeleton: $("cpuSkeleton"),
+    sortSelector: $("sortSelector"),
+    sortLatencyBtn: $("sortLatencyBtn"),
+    sortCpuBtn: $("sortCpuBtn"),
+    cpuMonitorToggle: $("cpuMonitorToggle"),
   };
   return _domDeferred;
 }
 
 const state = {
+  sortBy: "latency",
+  liveCpuMonitoring: false,
+  liveCpuTimer: null,
+  livePerformanceData: null,
   scanning: false,
   lastScanTime: null,
   online: null,
@@ -1012,16 +1023,34 @@ function updateDashboardStats(report) {
     d.bottleneckTrack.textContent = "No PDC bottleneck";
     d.highlightBottleneck.hidden = true;
   }
+  const peakCpu = report.highest_cpu_track;
+  if (d.peakCpuTrack) {
+    if (peakCpu && hasNumericValue(peakCpu.cpu_percent)) {
+      d.peakCpuTrack.textContent = peakCpu.track_name || `Track ${(peakCpu.track_index ?? 0) + 1}`;
+      d.peakCpuTrack.hidden = false;
+      if (d.peakCpuPct) {
+        d.peakCpuPct.textContent = `${peakCpu.cpu_percent}%`;
+        d.peakCpuPct.hidden = false;
+      }
+    } else {
+      d.peakCpuTrack.textContent = "--";
+      d.peakCpuTrack.hidden = false;
+      if (d.peakCpuPct) d.peakCpuPct.hidden = true;
+    }
+  }
+
   if (hasNumericValue(report.buffer_size)) {
     tweenText(d.bufferSize, Number(report.buffer_size), (n) => String(Math.round(n)));
   } else {
     d.bufferSize.textContent = "--";
   }
 
-  revealContent(
-    [d.totalLatencyMs, d.bufferSize],
-    [d.latencySkeleton, d.bufferSkeleton]
-  );
+  const reveals = [d.totalLatencyMs, d.bufferSize];
+  const skeletons = [d.latencySkeleton, d.bufferSkeleton];
+  if (d.peakCpuTrack) reveals.push(d.peakCpuTrack);
+  if (d.cpuSkeleton) skeletons.push(d.cpuSkeleton);
+
+  revealContent(reveals, skeletons);
 }
 
 function getRecommendationIconSvg(type) {
@@ -1185,7 +1214,10 @@ function updatePluginRow(row, item, maxSessionSamples) {
 
   if (hasNumericValue(item.track_number)) {
     const channelLabel = String(Number(item.track_number)).padStart(2, "0");
-    const channelTitleHtml = `<span class="channel-number">${escapeHtml(channelLabel)}</span><span class="channel-name">${escapeHtml(name)}</span>`;
+    const cpuBadge = hasNumericValue(item.cpu_percent)
+      ? ` <span class="channel-cpu-badge ${item.is_highest_cpu ? "highest" : ""}" title="Track CPU performance impact: ${item.cpu_percent}%">${item.is_highest_cpu ? "Peak " : ""}CPU ${item.cpu_percent}%</span>`
+      : "";
+    const channelTitleHtml = `<span class="channel-number">${escapeHtml(channelLabel)}</span><span class="channel-name">${escapeHtml(name)}</span>${cpuBadge}`;
     if (nameEl.innerHTML !== channelTitleHtml) nameEl.innerHTML = channelTitleHtml;
   } else if (nameEl.textContent !== name) {
     nameEl.textContent = name;
@@ -1325,6 +1357,8 @@ function channelRows(report) {
       deviceNames: [],
       latency_samples: 0,
       latency_ms: 0,
+      cpu_percent: track.cpu_percent !== undefined ? track.cpu_percent : null,
+      performance_impact: track.performance_impact !== undefined ? track.performance_impact : null,
     };
     const samples = Number(device.latency_samples || 0);
     const ms = Number(device.latency_ms || 0);
@@ -1342,24 +1376,38 @@ function channelRows(report) {
   });
 
   const bottleneck = report.bottleneck_track;
+  const highestCpu = report.highest_cpu_track;
   return [...groups.values()].map((group) => ({
     key: group.key,
     title: group.title,
     track_number: group.track_number,
+    track_index: group.track_index,
     subtitle: group.devices.slice().sort((a, b) => Number(b.latency_samples || 0) - Number(a.latency_samples || 0))[0]?.detail_name || "No latency device",
     latency_samples: group.latency_samples,
     latency_ms: group.latency_ms,
+    cpu_percent: group.cpu_percent,
+    performance_impact: group.performance_impact,
     instance_count: group.devices.length,
     impact_score: Math.round(group.latency_ms * group.devices.length * 1000) / 1000,
     instances: group.devices,
     details: { nameLabel: "Plug-in", showTrackKind: false },
     is_bottleneck: Boolean(bottleneck && String(bottleneck.track_index) === String(group.track_index)),
+    is_highest_cpu: Boolean(highestCpu && String(highestCpu.track_index) === String(group.track_index) && (group.cpu_percent || 0) > 0),
   }));
 }
 
 // ── Filter & sort ──
 
 function sortRows(rows) {
+  if (state.sortBy === "cpu") {
+    return rows.slice().sort((a, b) =>
+      (Number(b.cpu_percent ?? -1) - Number(a.cpu_percent ?? -1)) ||
+      (Number(b.performance_impact ?? -1) - Number(a.performance_impact ?? -1)) ||
+      b.latency_samples - a.latency_samples ||
+      b.latency_ms - a.latency_ms ||
+      compareRowsByStableLabel(a, b)
+    );
+  }
   return rows.slice().sort((a, b) =>
     b.latency_samples - a.latency_samples || b.latency_ms - a.latency_ms || compareRowsByStableLabel(a, b)
   );
@@ -1375,9 +1423,57 @@ function filterRows(rows) {
 }
 
 function currentRows(report) {
-  const raw = channelRows(report).filter((row) => row.latency_samples > 0 || row.latency_ms > 0);
+  const raw = channelRows(report).filter((row) =>
+    state.sortBy === "cpu"
+      ? (row.latency_samples > 0 || row.latency_ms > 0 || (row.cpu_percent !== null && row.cpu_percent > 0))
+      : (row.latency_samples > 0 || row.latency_ms > 0)
+  );
   const filtered = filterRows(raw);
   return sortRows(filtered);
+}
+
+async function pollLivePerformance() {
+  if (!state.liveCpuMonitoring) return;
+  try {
+    const res = await api.request("/api/performance");
+    if (res && res.available && res.tracks && state.latestReport) {
+      state.livePerformanceData = res;
+      const perfByIndex = new Map(res.tracks.map((t) => [t.track_index, t]));
+      (state.latestReport.tracks || []).forEach((trk) => {
+        const p = perfByIndex.get(trk.index);
+        if (p) {
+          trk.performance_impact = p.performance_impact;
+          trk.cpu_percent = p.cpu_percent;
+        }
+      });
+      state.latestReport.highest_cpu_track = res.highest_cpu_track;
+      updateDashboardStats(state.latestReport);
+      updateResults(state.latestReport);
+    }
+  } catch (err) {
+    // Non-fatal; continue
+  }
+}
+
+function toggleLiveCpuMonitoring(forceState) {
+  const next = typeof forceState === "boolean" ? forceState : !state.liveCpuMonitoring;
+  state.liveCpuMonitoring = next;
+  const btn = getDom().cpuMonitorToggle;
+  if (btn) {
+    btn.classList.toggle("active", next);
+    btn.setAttribute("aria-pressed", String(next));
+  }
+  if (next) {
+    pollLivePerformance();
+    if (!state.liveCpuTimer) {
+      state.liveCpuTimer = setInterval(pollLivePerformance, 1500);
+    }
+  } else {
+    if (state.liveCpuTimer) {
+      clearInterval(state.liveCpuTimer);
+      state.liveCpuTimer = null;
+    }
+  }
 }
 
 function renderComparison(report) {
@@ -2106,6 +2202,28 @@ function bindDeferredEvents() {
     closeSettings({ restoreFocus: false });
     resetOnboardingPreference(d.settingsButton);
   });
+
+  if (d.sortLatencyBtn) {
+    d.sortLatencyBtn.addEventListener("click", () => {
+      state.sortBy = "latency";
+      d.sortLatencyBtn.classList.add("active");
+      d.sortCpuBtn?.classList.remove("active");
+      if (state.latestReport) updateResults(state.latestReport);
+    });
+  }
+  if (d.sortCpuBtn) {
+    d.sortCpuBtn.addEventListener("click", () => {
+      state.sortBy = "cpu";
+      d.sortCpuBtn.classList.add("active");
+      d.sortLatencyBtn?.classList.remove("active");
+      if (state.latestReport) updateResults(state.latestReport);
+    });
+  }
+  if (d.cpuMonitorToggle) {
+    d.cpuMonitorToggle.addEventListener("click", () => {
+      toggleLiveCpuMonitoring();
+    });
+  }
 
   let searchDebounce = null;
   d.searchInput.addEventListener("input", () => {
