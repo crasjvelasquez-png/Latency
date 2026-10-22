@@ -1009,20 +1009,6 @@ function updateDashboardStats(report) {
     d.totalLatencyMs.textContent = "--";
     delete d.totalLatencyMs.dataset.value;
   }
-  const bottleneck = report.bottleneck_track;
-  if (bottleneck) {
-    d.bottleneckTrack.textContent = bottleneck.track_name;
-    d.highlightBottleneck.dataset.trackName = bottleneck.track_name;
-    if (bottleneck.track_index !== undefined && bottleneck.track_index !== null) {
-      d.highlightBottleneck.dataset.trackIndex = bottleneck.track_index;
-    } else {
-      delete d.highlightBottleneck.dataset.trackIndex;
-    }
-    d.highlightBottleneck.hidden = false;
-  } else {
-    d.bottleneckTrack.textContent = "No PDC bottleneck";
-    d.highlightBottleneck.hidden = true;
-  }
   const peakCpu = report.highest_cpu_track;
   if (d.peakCpuTrack) {
     if (peakCpu && hasNumericValue(peakCpu.cpu_percent)) {
@@ -1039,14 +1025,8 @@ function updateDashboardStats(report) {
     }
   }
 
-  if (hasNumericValue(report.buffer_size)) {
-    tweenText(d.bufferSize, Number(report.buffer_size), (n) => String(Math.round(n)));
-  } else {
-    d.bufferSize.textContent = "--";
-  }
-
-  const reveals = [d.totalLatencyMs, d.bufferSize];
-  const skeletons = [d.latencySkeleton, d.bufferSkeleton];
+  const reveals = [d.totalLatencyMs];
+  const skeletons = [d.latencySkeleton];
   if (d.peakCpuTrack) reveals.push(d.peakCpuTrack);
   if (d.cpuSkeleton) skeletons.push(d.cpuSkeleton);
 
@@ -2484,6 +2464,7 @@ let onboardingTriggerElement = null;
 
 function showOnboarding(triggerElement = null) {
   onboardingTriggerElement = triggerElement;
+  $("setupHelpButton").setAttribute("aria-expanded", "true");
   onboarding.overlay.hidden = false;
   onboarding.overlay.setAttribute("aria-modal", "true");
   const d = getDom();
@@ -2507,6 +2488,7 @@ function showOnboarding(triggerElement = null) {
 
 function hideOnboarding(returnFocusTo) {
   onboarding.overlay.hidden = true;
+  $("setupHelpButton").setAttribute("aria-expanded", "false");
   onboarding.overlay.removeAttribute("aria-modal");
   const d = getDom();
   if ("inert" in HTMLElement.prototype) {
@@ -2599,6 +2581,10 @@ async function runOnboarding() {
 }
 
 onboarding.recheck.addEventListener("click", runOnboarding);
+$("setupHelpButton").addEventListener("click", (event) => {
+  showOnboarding(event.currentTarget);
+  runOnboarding();
+});
 onboarding.dismiss.addEventListener("click", () => {
   persistOnboardingDismissal();
   hideOnboarding();
@@ -2682,7 +2668,7 @@ function setWorkflowMode(mode) {
 
 // ── Init ──
 
-async function init() {
+async function init({ showSetupOnLaunch = window.location.search.includes("test=1") } = {}) {
   const storedWorkflowMode = localStorage.getItem("latency_workflow_mode");
   state.workflowMode = WORKFLOW_MODES.includes(storedWorkflowMode) ? storedWorkflowMode : "recording";
   bindDeferredEvents();
@@ -2700,7 +2686,8 @@ async function init() {
   updateScanTimestamp();
   setInterval(updateScanTimestamp, 10000);
 
-  if (isOnboardingDismissed() || isOnboardingCompleted()) {
+  // Keep the original guided startup available, but make setup assistance opt-in.
+  if (!showSetupOnLaunch || isOnboardingDismissed() || isOnboardingCompleted()) {
     beginInitialScan();
     return;
   }

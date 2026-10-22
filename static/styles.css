@@ -356,7 +356,7 @@ select:focus-visible {
 /* ── Session measurements ── */
 .recording-verdict {
   display: grid;
-  grid-template-columns: 1fr 1.25fr 1.15fr 0.95fr;
+  grid-template-columns: 1fr 1fr;
   padding: 26px 28px;
   background: var(--panel-bg);
   border: 1px solid var(--card-border);
@@ -1952,11 +1952,7 @@ select:focus-visible {
   }
 
   .report-panel { padding: 0; }
-  .verdict-track { grid-column: 1 / -1; grid-row: 2; }
-  .verdict-cpu { grid-column: 1 / -1; grid-row: 3; }
-  .recording-verdict > .verdict-track { border-left: 0; border-top: 1px solid var(--line); padding: 16px 0 0; }
-  .recording-verdict > .verdict-cpu { border-left: 0; border-top: 1px solid var(--line); padding: 16px 0 0; }
-  .recording-verdict > .verdict-buffer { padding-left: 20px; }
+  .recording-verdict > .verdict-cpu { padding-left: 20px; }
   .verdict-value strong { font-size: 30px; }
   .report-toolbar { width: 100%; }
 
